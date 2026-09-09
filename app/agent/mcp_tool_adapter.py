@@ -75,7 +75,7 @@ class MCPToolAdapter:
         return StructuredTool(
             name="describe_table",
             description="Get column information for a table",
-            func=describe_table,
+            coroutine=describe_table,
             args_schema=DescribeTableInput,
         )
 
@@ -99,7 +99,7 @@ class MCPToolAdapter:
         return StructuredTool(
             name="sample_rows",
             description="Sample rows from a table",
-            func=sample_rows,
+            coroutine=sample_rows,
             args_schema=SampleRowsInput,
         )
 
@@ -125,6 +125,6 @@ class MCPToolAdapter:
         return StructuredTool(
             name="run_sql",
             description="Execute a SQL query against a database",
-            func=run_sql,
+            coroutine=run_sql,
             args_schema=RunSqlInput,
         )
