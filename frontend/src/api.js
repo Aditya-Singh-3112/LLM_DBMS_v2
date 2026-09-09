@@ -39,4 +39,21 @@ api.interceptors.response.use(
   }
 );
 
+export function getErrorMessage(err, fallback = 'Something went wrong. Please try again.') {
+  const detail = err?.response?.data?.detail;
+
+  if (!detail) return fallback;
+  if (typeof detail === 'string') return detail;
+
+  // FastAPI validation errors: array of {type, loc, msg, ...}
+  if (Array.isArray(detail)) {
+    return detail
+      .map((d) => (typeof d === 'string' ? d : d.msg))
+      .filter(Boolean)
+      .join(', ');
+  }
+
+  return fallback;
+}
+
 export default api;

@@ -10,6 +10,12 @@ from app.models.contracts import AskRequest, AskResponse
 from app.models.tool_call_log import ToolCallSource, ToolCallStatus
 from app.services.database_registry import DatabaseRegistryService
 from app.services.rag_service import RAGService
+from app.services.mcp_tools import MCPToolService
+from app.services.permission_service import PermissionService
+from app.services.postgres_executor import PostgresExecutor
+from app.services.cache_service import CacheService
+from app.services.rate_limiter import RateLimiter
+from app.agent.mcp_tool_service_adapter import MCPToolServiceAdapter
 from app.mcp_server.client import MCPClientWrapper
 from app.agent.agent_factory import AgentFactory
 
@@ -80,8 +86,21 @@ async def ask_database(database_id: str, ask_request: AskRequest, current_user: 
 
     await rag_service.initialize()
 
-    mcp_client = MCPClientWrapper(
-        session=db_manager.mcp_session,
+    postgres_executor = PostgresExecutor(db_manager)
+    permission_service = PermissionService(registry_service)
+    cache_service = CacheService(redis=db_manager.redis)
+    rate_limiter = RateLimiter(redis=db_manager.redis, calls_per_minute=60)
+
+    mcp_tool_service = MCPToolService(
+        postgres_executor=postgres_executor,
+        permission_service=permission_service,
+        mongo_database=mongo_db,
+        cache_service=cache_service,
+        rate_limiter=rate_limiter,
+    )
+
+    mcp_client = MCPToolServiceAdapter(
+        service=mcp_tool_service,
         user_id=current_user.id,
     )
 

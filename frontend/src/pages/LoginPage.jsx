@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuthStore } from '../store';
 import api from '../api';
+import { getErrorMessage } from '../api'; 
 
 export default function LoginPage() {
   const navigate = useNavigate();
@@ -31,9 +32,7 @@ export default function LoginPage() {
 
       navigate('/databases');
     } catch (err) {
-      setError(
-        err.response?.data?.detail || 'Login failed. Please try again.'
-      );
+      setError(getErrorMessage(err, 'Login failed. Please try again.'));
     } finally {
       setLoading(false);
     }

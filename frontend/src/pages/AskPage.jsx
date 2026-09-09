@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import { useDatabaseStore } from '../store';
 import api from '../api';
+import { getErrorMessage } from '../api'; 
 
 export default function AskPage() {
   const { databaseId } = useParams();
@@ -29,7 +30,7 @@ export default function AskPage() {
       });
       setResult(response.data);
     } catch (err) {
-      setError(err.response?.data?.detail || 'Query failed');
+      setError(getErrorMessage(err, 'Query failed'));
     } finally {
       setLoading(false);
     }

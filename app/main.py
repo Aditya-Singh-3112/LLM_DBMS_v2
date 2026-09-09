@@ -1,6 +1,7 @@
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.ask import router as ask_router
 from app.api.auth import router as auth_router
@@ -61,6 +62,18 @@ app = FastAPI(
     title=settings.app_name,
     debug=settings.debug,
     lifespan=lifespan,
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:3000",       # CRA dev server
+        "http://172.17.237.64:3000",   # the LAN address your terminal output shows
+    ],
+    allow_credentials=True,   # needed if the frontend sends the JWT as a cookie;
+                               # harmless if you're using an Authorization header instead
+    allow_methods=["*"],      # or explicitly ["GET", "POST", "PUT", "DELETE", "OPTIONS"]
+    allow_headers=["*"],      # or explicitly ["Authorization", "Content-Type"]
 )
 
 app.include_router(health_router)

@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useDatabaseStore, useAuthStore } from '../store';
 import api from '../api';
+import { getErrorMessage } from '../api'; 
 
 export default function DatabasesPage() {
   const navigate = useNavigate();
@@ -40,7 +41,7 @@ export default function DatabasesPage() {
       setDatabases([...databases, response.data]);
       setNewName('');
     } catch (err) {
-      setError(err.response?.data?.detail || 'Failed to create database');
+      setError(getErrorMessage(err, 'Failed to create database.'));
     }
   };
 

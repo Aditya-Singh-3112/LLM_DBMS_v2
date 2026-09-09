@@ -31,3 +31,4 @@ httpx-sse>=0.3.0
 
 openpyxl>=3.0.0
 python-multipart
+argon2_cffi
