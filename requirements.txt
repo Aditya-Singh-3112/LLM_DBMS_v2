@@ -1,0 +1,33 @@
+fastapi
+uvicorn[standard]
+pydantic
+pydantic-settings
+motor
+redis
+asyncpg
+python-dotenv
+PyJWT
+passlib[argon2]
+python-multipart
+httpx
+
+# MCP and LangChain agent
+mcp
+langchain
+langchain-core
+langchain-google-genai
+
+# RAG ingestion
+pypdf
+pgvector
+
+# Development
+pytest
+pytest-asyncio
+ruff
+
+mcp>=1.9.0, <2.0
+httpx-sse>=0.3.0
+
+openpyxl>=3.0.0
+python-multipart
