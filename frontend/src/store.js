@@ -67,4 +67,32 @@ const useDatabaseStore = create((set) => ({
     })),
 }));
 
-export { useAuthStore, useDatabaseStore };
+const HISTORY_LIMIT = 20;
+
+const useQueryHistoryStore = create((set, get) => ({
+  historyByDb: JSON.parse(localStorage.getItem('queryHistory') || '{}'),
+
+  addQuery: (databaseId, query) => {
+    const historyByDb = { ...get().historyByDb };
+    const existing = historyByDb[databaseId] || [];
+    const updated = [
+      { query, timestamp: Date.now() },
+      ...existing.filter((h) => h.query !== query),
+    ].slice(0, HISTORY_LIMIT);
+
+    historyByDb[databaseId] = updated;
+    localStorage.setItem('queryHistory', JSON.stringify(historyByDb));
+    set({ historyByDb });
+  },
+
+  getHistory: (databaseId) => get().historyByDb[databaseId] || [],
+
+  clearHistory: (databaseId) => {
+    const historyByDb = { ...get().historyByDb };
+    delete historyByDb[databaseId];
+    localStorage.setItem('queryHistory', JSON.stringify(historyByDb));
+    set({ historyByDb });
+  },
+}));
+
+export { useAuthStore, useDatabaseStore, useQueryHistoryStore };

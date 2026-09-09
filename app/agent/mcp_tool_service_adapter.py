@@ -19,6 +19,7 @@ class MCPToolServiceAdapter:
     def __init__(self, service: MCPToolService, user_id: str) -> None:
         self.service = service
         self.user_id = user_id
+        self.last_run_sql_result: dict | None = None
 
     async def list_schemas(self, database_id: str) -> dict[str, Any]:
         result = await self.service.list_schemas(
@@ -44,4 +45,6 @@ class MCPToolServiceAdapter:
         result = await self.service.run_sql(
             RunSqlRequest(database_id=database_id, sql=sql), self.user_id
         )
-        return result.model_dump()
+        dumped = result.model_dump()
+        self.last_run_sql_result = dumped
+        return dumped

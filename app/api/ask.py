@@ -8,6 +8,7 @@ from app.core.database import DatabaseManager
 from app.models.auth import UserResponse
 from app.models.contracts import AskRequest, AskResponse
 from app.models.tool_call_log import ToolCallSource, ToolCallStatus
+from app.models.contracts import AskRequest, AskResponse, QueryResult 
 from app.services.database_registry import DatabaseRegistryService
 from app.services.rag_service import RAGService
 from app.services.mcp_tools import MCPToolService
@@ -140,12 +141,19 @@ async def ask_database(database_id: str, ask_request: AskRequest, current_user: 
 
     grounded_on = _extract_grounded_passages(tool_calls, intermediate_steps)
 
+    query_result = None
+    if mcp_client.last_run_sql_result:
+        query_result = QueryResult(
+            columns=mcp_client.last_run_sql_result["columns"],
+            rows=mcp_client.last_run_sql_result["rows"],
+        )
+
     total_execution_time_ms = int((time.time() - start_time) * 1000)
 
     return AskResponse(
         answer=answer,
         sql=_extract_sql_from_tool_calls(tool_calls),
-        result=None,
+        result=query_result,
         tool_calls=tool_calls,
         grounded_on=grounded_on,
         total_execution_time_ms=total_execution_time_ms,
