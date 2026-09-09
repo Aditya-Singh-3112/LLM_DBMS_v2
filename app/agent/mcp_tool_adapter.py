@@ -54,7 +54,7 @@ class MCPToolAdapter:
         return StructuredTool(
             name="list_schemas",
             description="List all tables in a database",
-            func=list_schemas,
+            coroutine=list_schemas, 
             args_schema=ListSchemasInput,
         )
 
