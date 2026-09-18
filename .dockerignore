@@ -1,0 +1,7 @@
+frontend
+tests
+.git
+.github
+__pycache__
+*.md
+.env

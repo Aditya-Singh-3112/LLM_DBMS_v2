@@ -14,6 +14,7 @@ class ToolCallStatus(str, Enum):
     SUCCESS = "success"
     DENIED = "denied"
     ERROR = "error"
+    PENDING = "pending"  # write awaiting user confirmation
 
 
 class ToolCallEntry(BaseModel):

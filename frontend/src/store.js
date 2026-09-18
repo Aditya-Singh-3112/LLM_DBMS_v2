@@ -1,53 +1,68 @@
-import create from 'zustand';
+import { create } from 'zustand';
+import { API_BASE } from './apiBase';
 
-const useAuthStore = create((set) => ({
-  accessToken: localStorage.getItem('accessToken'),
-  refreshToken: localStorage.getItem('refreshToken'),
+const useAuthStore = create((set, get) => ({
+  // The access token lives only in memory; the refresh token is an HttpOnly
+  // cookie the browser sends to /auth/* on its own.
+  accessToken: null,
   user: null,
-  isAuthenticated: !!localStorage.getItem('accessToken'),
+  isAuthenticated: false,
+  // true until the first refresh attempt on page load has completed
+  bootstrapping: true,
 
-  setTokens: (accessToken, refreshToken) => {
-    localStorage.setItem('accessToken', accessToken);
-    localStorage.setItem('refreshToken', refreshToken);
-    set({ accessToken, refreshToken, isAuthenticated: true });
-  },
+  setAccessToken: (accessToken) => set({ accessToken, isAuthenticated: !!accessToken }),
 
   setUser: (user) => set({ user }),
 
-  logout: () => {
-    localStorage.removeItem('accessToken');
-    localStorage.removeItem('refreshToken');
-    set({
-      accessToken: null,
-      refreshToken: null,
-      user: null,
-      isAuthenticated: false,
-    });
+  logout: async () => {
+    try {
+      await fetch(`${API_BASE}/auth/logout`, {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'X-Requested-With': 'XMLHttpRequest' },
+      });
+    } catch {
+      // the local session is cleared regardless
+    }
+    set({ accessToken: null, user: null, isAuthenticated: false });
   },
 
   refreshAccessToken: async () => {
-    const refreshToken = localStorage.getItem('refreshToken');
-    if (!refreshToken) return false;
-
     try {
-      const response = await fetch('/auth/refresh', {
+      const response = await fetch(`${API_BASE}/auth/refresh`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ refresh_token: refreshToken }),
+        credentials: 'include',
+        headers: { 'X-Requested-With': 'XMLHttpRequest' },
       });
 
       if (response.ok) {
         const data = await response.json();
-        localStorage.setItem('accessToken', data.access_token);
-        localStorage.setItem('refreshToken', data.refresh_token);
-        set({ accessToken: data.access_token, refreshToken: data.refresh_token });
+        set({ accessToken: data.access_token, isAuthenticated: true });
         return true;
       }
     } catch (error) {
       console.error('Token refresh failed:', error);
     }
 
+    set({ accessToken: null, isAuthenticated: false });
     return false;
+  },
+
+  // Called once on app start: restore the session from the cookie, if any.
+  bootstrap: async () => {
+    if (!get().bootstrapping) return;
+    const ok = await get().refreshAccessToken();
+    if (ok) {
+      try {
+        const response = await fetch(`${API_BASE}/auth/me`, {
+          headers: { Authorization: `Bearer ${get().accessToken}` },
+        });
+        if (response.ok) set({ user: await response.json() });
+      } catch {
+        // non-fatal
+      }
+    }
+    set({ bootstrapping: false });
   },
 }));
 

@@ -1,10 +1,11 @@
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useDatabaseStore } from '../store';
 import api, { getErrorMessage } from '../api';
 import Layout from '../components/Layout';
 import Banner from '../components/Banner';
 import Spinner from '../components/Spinner';
+import ShareModal from '../components/ShareModal';
 
 const accessBadge = {
   owner: 'bg-brand-100 text-brand-700',
@@ -22,12 +23,9 @@ export default function DatabasesPage() {
   const [loading, setLoading] = useState(true);
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState('');
+  const [sharing, setSharing] = useState(null);
 
-  useEffect(() => {
-    fetchDatabases();
-  }, []);
-
-  const fetchDatabases = async () => {
+  const fetchDatabases = useCallback(async () => {
     try {
       const response = await api.get('/databases');
       setDatabases(response.data);
@@ -36,7 +34,11 @@ export default function DatabasesPage() {
     } finally {
       setLoading(false);
     }
-  };
+  }, [setDatabases]);
+
+  useEffect(() => {
+    fetchDatabases();
+  }, [fetchDatabases]);
 
   const handleCreate = async (e) => {
     e.preventDefault();
@@ -145,6 +147,14 @@ export default function DatabasesPage() {
                 </button>
                 {db.access_level === 'owner' && (
                   <button
+                    onClick={() => setSharing(db)}
+                    className="bg-gray-50 hover:bg-gray-100 text-gray-700 font-medium px-4 py-2 rounded-xl transition"
+                  >
+                    Share
+                  </button>
+                )}
+                {db.access_level === 'owner' && (
+                  <button
                     onClick={() => handleDelete(db.id)}
                     className="bg-red-50 hover:bg-red-100 text-red-600 font-medium px-4 py-2 rounded-xl transition"
                   >
@@ -156,6 +166,7 @@ export default function DatabasesPage() {
           ))}
         </div>
       )}
+      {sharing && <ShareModal database={sharing} onClose={() => setSharing(null)} />}
     </Layout>
   );
 }

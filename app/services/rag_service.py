@@ -9,11 +9,43 @@ from langchain_google_genai import GoogleGenerativeAIEmbeddings
 from app.core.database import DatabaseManager
 from app.models.rag import TextbookChunk, RetrievalResult
 
-# gemini-embedding-001 defaults to 3072 dims; this must match the VECTOR(...)
-# column width in rag.textbook_chunks (768 per the design doc). Passing
-# output_dimensionality explicitly is required — some installed versions of
-# langchain-google-genai silently ignore it if set only on the constructor.
+# Shared by retrieval (here) and ingestion (scripts/ingest_textbook.py) so the
+# two can never drift onto different models or vector widths.
+EMBEDDING_MODEL = "models/gemini-embedding-001"
 EMBEDDING_DIMENSIONS = 768
+COLLECTION_NAME = "textbook_chunks"
+
+
+def build_embeddings(google_api_key: str | None = None) -> GoogleGenerativeAIEmbeddings:
+    """Embedding model used for both ingestion and retrieval."""
+    return GoogleGenerativeAIEmbeddings(
+        model=EMBEDDING_MODEL,
+        output_dimensionality=EMBEDDING_DIMENSIONS,
+        google_api_key=google_api_key,
+    )
+
+
+def build_vector_store(postgres_uri: str, embeddings: GoogleGenerativeAIEmbeddings) -> PGVector:
+    """PGVector store configured for async use against the app's Postgres."""
+    return PGVector(
+        collection_name=COLLECTION_NAME,
+        connection=as_psycopg3_dsn(postgres_uri),
+        embeddings=embeddings,
+        embedding_length=EMBEDDING_DIMENSIONS,
+        use_jsonb=True,
+        async_mode=True,
+    )
+
+
+def as_psycopg3_dsn(dsn: str) -> str:
+    """Normalize a plain/psycopg2 Postgres DSN to the psycopg3 scheme PGVector needs."""
+    if dsn.startswith("postgresql+psycopg://"):
+        return dsn
+    if dsn.startswith("postgresql+psycopg2://"):
+        return dsn.replace("postgresql+psycopg2://", "postgresql+psycopg://", 1)
+    if dsn.startswith("postgresql://"):
+        return dsn.replace("postgresql://", "postgresql+psycopg://", 1)
+    return dsn
 
 
 class RAGService:
@@ -35,24 +67,11 @@ class RAGService:
         if self._vector_store is not None:
             return
 
-        embeddings = GoogleGenerativeAIEmbeddings(
-            model="models/gemini-embedding-001",
-            output_dimensionality=EMBEDDING_DIMENSIONS,
-        )
-
-        # langchain_postgres.PGVector needs `connection` (not `connection_string`)
-        # and `embeddings` (not `embedding_function`), and it requires psycopg3 —
-        # the DSN must use the `postgresql+psycopg://` scheme, not plain
-        # `postgresql://` or `+psycopg2`.
-        connection = self._as_psycopg3_dsn(self.database_manager.settings.postgres_uri)
-
-        self._vector_store = PGVector(
-            collection_name="textbook_chunks",
-            connection=connection,
-            embeddings=embeddings,
-            embedding_length=EMBEDDING_DIMENSIONS,
-            use_jsonb=True,
-        )
+        settings = self.database_manager.settings
+        if not settings.rag_enabled:
+            return
+        embeddings = build_embeddings(settings.google_api_key)
+        vector_store = build_vector_store(settings.postgres_uri, embeddings)
 
         # Fail loudly at startup, not on the first user query, if the model's
         # actual output dimension doesn't match what we told PGVector to expect.
@@ -60,11 +79,10 @@ class RAGService:
         if actual_dims != EMBEDDING_DIMENSIONS:
             raise RuntimeError(
                 f"Embedding model returned {actual_dims}-dim vectors but "
-                f"RAGService/pgvector is configured for {EMBEDDING_DIMENSIONS}. "
-                "output_dimensionality was likely ignored by this version of "
-                "langchain-google-genai — either upgrade the package or widen "
-                "the rag.textbook_chunks.embedding column to match."
+                f"RAGService/pgvector is configured for {EMBEDDING_DIMENSIONS}."
             )
+
+        self._vector_store = vector_store
 
     async def retrieve(self, query: str, k: int = 4, max_k: int = 10) -> RetrievalResult:
         """
@@ -73,20 +91,18 @@ class RAGService:
         """
         if self._vector_store is None:
             await self.initialize()
+        if self._vector_store is None:
+            return RetrievalResult(passages=[], from_cache=False)
 
-        if k > max_k:
-            k = max_k
-
+        k = min(k, max_k)
         cache_key = self._cache_key(query, k)
 
-        if self.redis is not None:
-            cached = await self.redis.get(cache_key)
-            if cached is not None:
-                data = json.loads(cached)
-                return RetrievalResult(
-                    passages=[TextbookChunk(**p) for p in data["passages"]],
-                    from_cache=True,
-                )
+        cached = await self._cache_get(cache_key)
+        if cached is not None:
+            return RetrievalResult(
+                passages=[TextbookChunk(**p) for p in cached["passages"]],
+                from_cache=True,
+            )
 
         try:
             # Query the store directly instead of going through .as_retriever():
@@ -110,27 +126,26 @@ class RAGService:
         except Exception as e:
             raise RuntimeError(f"Failed to retrieve documents: {str(e)}") from e
 
-        result = RetrievalResult(passages=chunks, from_cache=False)
+        await self._cache_set(cache_key, {"passages": [c.model_dump() for c in chunks]})
 
-        if self.redis is not None:
-            await self.redis.setex(
-                cache_key,
-                self.CACHE_TTL_SECONDS,
-                json.dumps({"passages": [c.model_dump() for c in chunks]}),
-            )
+        return RetrievalResult(passages=chunks, from_cache=False)
 
-        return result
+    async def _cache_get(self, key: str) -> dict | None:
+        if self.redis is None:
+            return None
+        try:
+            cached = await self.redis.get(key)
+        except Exception:
+            return None
+        return json.loads(cached) if cached is not None else None
 
-    @staticmethod
-    def _as_psycopg3_dsn(dsn: str) -> str:
-        """Normalize a plain/psycopg2 Postgres DSN to the psycopg3 scheme PGVector needs."""
-        if dsn.startswith("postgresql+psycopg://"):
-            return dsn
-        if dsn.startswith("postgresql+psycopg2://"):
-            return dsn.replace("postgresql+psycopg2://", "postgresql+psycopg://", 1)
-        if dsn.startswith("postgresql://"):
-            return dsn.replace("postgresql://", "postgresql+psycopg://", 1)
-        return dsn
+    async def _cache_set(self, key: str, value: dict) -> None:
+        if self.redis is None:
+            return
+        try:
+            await self.redis.setex(key, self.CACHE_TTL_SECONDS, json.dumps(value))
+        except Exception:
+            pass
 
     @staticmethod
     def _cache_key(query: str, k: int) -> str:

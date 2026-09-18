@@ -53,7 +53,7 @@ class AuthService:
         if not user.get("is_active", False):
             raise HTTPException(
                 status_code = status.HTTP_403_FORBIDDEN,
-                detail = "This account is inacitve"
+                detail = "This account is inactive"
             )
 
         return await self._issue_tokens(str(user["_id"]))
@@ -64,7 +64,7 @@ class AuthService:
         stored_token = await self.refresh_tokens.find_one(
             {
                 "token_hash": token_hash,
-                "revoked-at": None
+                "revoked_at": None
             }
         )
 
@@ -100,7 +100,7 @@ class AuthService:
         if user is None:
             raise HTTPException(
                 status_code = status.HTTP_401_UNAUTHORIZED,
-                detail = "User account is unavailable / user not registerd."
+                detail = "User account is unavailable / user not registered."
             )
 
         return await self._issue_tokens(user_id)

@@ -1,5 +1,7 @@
 .env
-*.md
 .vscode
 __pycache__
 node_modules
+frontend/build
+.ruff_cache
+.pytest_cache

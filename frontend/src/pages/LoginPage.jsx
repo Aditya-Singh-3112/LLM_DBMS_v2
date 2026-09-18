@@ -7,7 +7,7 @@ import Spinner from '../components/Spinner';
 
 export default function LoginPage() {
   const navigate = useNavigate();
-  const setTokens = useAuthStore((state) => state.setTokens);
+  const setAccessToken = useAuthStore((state) => state.setAccessToken);
   const setUser = useAuthStore((state) => state.setUser);
 
   const [email, setEmail] = useState('');
@@ -22,8 +22,8 @@ export default function LoginPage() {
 
     try {
       const response = await api.post('/auth/login', { email, password });
-      const { access_token, refresh_token } = response.data;
-      setTokens(access_token, refresh_token);
+      const { access_token } = response.data;
+      setAccessToken(access_token);
 
       const userResponse = await api.get('/auth/me', {
         headers: { Authorization: `Bearer ${access_token}` },

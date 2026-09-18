@@ -40,6 +40,13 @@ export default function ResultsTable({ columns, rows, exportFormat, onExportForm
             </tr>
           </thead>
           <tbody className="divide-y divide-gray-100">
+            {rows.length === 0 && (
+              <tr>
+                <td colSpan={Math.max(columns.length, 1)} className="px-3 py-6 text-center text-gray-400 italic">
+                  The query returned no rows.
+                </td>
+              </tr>
+            )}
             {rows.map((row, rowIdx) => (
               <tr key={rowIdx} className="hover:bg-brand-50/40">
                 {row.map((cell, cellIdx) => (

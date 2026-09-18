@@ -21,8 +21,8 @@ export default function Navbar() {
             <span className="hidden sm:block text-sm text-gray-500">{user.email}</span>
           )}
           <button
-            onClick={() => {
-              logout();
+            onClick={async () => {
+              await logout();
               navigate('/login');
             }}
             className="text-sm font-medium text-gray-600 hover:text-brand-700 transition"

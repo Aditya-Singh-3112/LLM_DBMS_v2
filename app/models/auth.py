@@ -19,7 +19,9 @@ class UserResponse(BaseModel):
 
 class TokenResponse(BaseModel):
     access_token: str
-    refresh_token: str
+    # Only populated internally; the API sets the refresh token as an
+    # HttpOnly cookie and never returns it in the body.
+    refresh_token: str | None = Field(default=None, exclude=True)
     token_type: str = "bearer"
     expires_in: int
 

@@ -17,13 +17,11 @@ export default function ReasoningSteps({ toolCalls }) {
 
   return (
     <div>
-      <h2 className="text-sm font-semibold text-gray-900 mb-2">
-        Reasoning steps ({toolCalls.length})
-      </h2>
       <div className="border border-gray-200 rounded-lg divide-y divide-gray-100 overflow-hidden">
         {toolCalls.map((call, idx) => {
           const isOpen = openIdx === idx;
-          const failed = call.status !== 'success';
+          const failed = call.status === 'error' || call.status === 'denied';
+          const pending = call.status === 'pending';
           return (
             <div key={idx}>
               <button
@@ -31,7 +29,7 @@ export default function ReasoningSteps({ toolCalls }) {
                 className="w-full flex items-center justify-between gap-3 px-4 py-3 text-left hover:bg-brand-50/60 transition"
               >
                 <div className="flex items-center gap-2 min-w-0">
-                  <span className={`h-2 w-2 rounded-full flex-shrink-0 ${failed ? 'bg-red-500' : 'bg-brand-500'}`} />
+                  <span className={`h-2 w-2 rounded-full flex-shrink-0 ${failed ? 'bg-red-500' : pending ? 'bg-amber-400' : 'bg-brand-500'}`} />
                   <span className="font-medium text-gray-900 truncate">{call.tool_name}</span>
                   <span className="text-xs px-2 py-0.5 rounded-full bg-gray-100 text-gray-500 flex-shrink-0">
                     {call.source}

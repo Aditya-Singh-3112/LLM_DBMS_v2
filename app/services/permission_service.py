@@ -34,7 +34,7 @@ class PermissionService:
         if level_hierarchy[actual_level] < level_hierarchy[required_level]:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail=f"You have {actual_level} access, but {required_level} is required",
+                detail=f"You have {actual_level.value} access, but {required_level.value} is required",
             )
 
         return actual_level

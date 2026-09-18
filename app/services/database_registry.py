@@ -9,6 +9,7 @@ from app.models.contracts import (
     AccessLevel,
     DatabaseCreateRequest,
     DatabaseResponse,
+    PermissionResponse,
 )
 
 
@@ -22,6 +23,7 @@ class DatabaseRegistryService:
         self.database_manager = database_manager
         self.databases = mongo_database["databases"]
         self.permissions = mongo_database["permissions"]
+        self.users = mongo_database["user"]
 
     async def initialize(self) -> None:
         await self.databases.create_index(
@@ -114,6 +116,8 @@ class DatabaseRegistryService:
         await self.permissions.delete_many(
             {"database_id": database_id}
         )
+        await self.mongo_database["conversations"].delete_many({"database_id": database_id})
+        await self.mongo_database["tool_call_logs"].delete_many({"database_id": database_id})
         await self.databases.delete_one(
             {"_id": ObjectId(database_id)}
         )
@@ -182,6 +186,55 @@ class DatabaseRegistryService:
             },
             upsert=True,
         )
+
+    async def resolve_user_id(self, email: str) -> str:
+        user = await self.users.find_one({"email": email.lower(), "is_active": True})
+        if user is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="No account with that email",
+            )
+        return str(user["_id"])
+
+    async def list_permissions(self, database_id: str, owner_id: str) -> list[PermissionResponse]:
+        database = await self._get_database(database_id)
+        if database["owner_id"] != owner_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Only the owner can view permissions",
+            )
+
+        out: list[PermissionResponse] = []
+        async for permission in self.permissions.find({"database_id": database_id}):
+            user = None
+            if ObjectId.is_valid(permission["user_id"]):
+                user = await self.users.find_one({"_id": ObjectId(permission["user_id"])})
+            out.append(
+                PermissionResponse(
+                    database_id=database_id,
+                    user_id=permission["user_id"],
+                    email=user["email"] if user else None,
+                    access_level=AccessLevel(permission["access_level"]),
+                )
+            )
+        return out
+
+    async def revoke(self, database_id: str, owner_id: str, user_id: str) -> None:
+        database = await self._get_database(database_id)
+        if database["owner_id"] != owner_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Only the owner can revoke access",
+            )
+
+        result = await self.permissions.delete_one(
+            {"database_id": database_id, "user_id": user_id}
+        )
+        if result.deleted_count == 0:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="That user has no access to revoke",
+            )
 
     async def _get_database(self, database_id: str) -> dict:
         if not ObjectId.is_valid(database_id):

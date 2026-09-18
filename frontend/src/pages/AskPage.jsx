@@ -1,49 +1,125 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { useDatabaseStore, useQueryHistoryStore } from '../store';
 import api, { getErrorMessage } from '../api';
+import { streamAsk } from '../streamAsk';
+import { downloadResponse } from '../download';
 import Layout from '../components/Layout';
 import Banner from '../components/Banner';
 import Spinner from '../components/Spinner';
-import ReasoningSteps from '../components/ReasoningSteps';
-import ResultsTable from '../components/ResultsTable';
+import TablesPanel from '../components/TablesPanel';
+import TurnCard from '../components/TurnCard';
+
+let nextTurnId = 1;
 
 export default function AskPage() {
   const { databaseId } = useParams();
   const selectedDatabase = useDatabaseStore((state) => state.selectedDatabase);
+  const setSelectedDatabase = useDatabaseStore((state) => state.setSelectedDatabase);
   const addQuery = useQueryHistoryStore((state) => state.addQuery);
   const getHistory = useQueryHistoryStore((state) => state.getHistory);
   const clearHistory = useQueryHistoryStore((state) => state.clearHistory);
 
   const [query, setQuery] = useState('');
-  const [result, setResult] = useState(null);
+  const [turns, setTurns] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [exportFormat, setExportFormat] = useState('csv');
-  const [copied, setCopied] = useState(false);
   const [history, setHistory] = useState([]);
+  const [tablesRefreshKey, setTablesRefreshKey] = useState(0);
+  const bottomRef = useRef(null);
+  const abortRef = useRef(null);
+
+  const canWrite =
+    selectedDatabase?.access_level === 'owner' || selectedDatabase?.access_level === 'write';
 
   useEffect(() => {
     setHistory(getHistory(databaseId));
+    setTurns([]);
   }, [databaseId, getHistory]);
 
-  const runQuery = async (q) => {
-    if (!q.trim()) return;
+  // The store is in-memory only, so after a page reload we no longer know
+  // which database this route refers to; look it up.
+  useEffect(() => {
+    if (selectedDatabase?.id === databaseId) return;
+    let cancelled = false;
+    api
+      .get('/databases')
+      .then((response) => {
+        if (cancelled) return;
+        const match = response.data.find((db) => db.id === databaseId);
+        if (match) setSelectedDatabase(match);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [databaseId, selectedDatabase, setSelectedDatabase]);
 
+  useEffect(() => {
+    bottomRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
+  }, [turns]);
+
+  // Abort an in-flight stream when leaving the page.
+  useEffect(() => () => abortRef.current?.abort(), []);
+
+  const updateTurn = (id, patch) =>
+    setTurns((prev) => prev.map((t) => (t.id === id ? { ...t, ...(typeof patch === 'function' ? patch(t) : patch) } : t)));
+
+  const runQuery = async (q, { reset = false } = {}) => {
+    const question = q.trim();
+    if (!question || loading) return;
+
+    const id = nextTurnId++;
+    const started = Date.now();
     setError('');
     setLoading(true);
-    setResult(null);
-    setCopied(false);
+    setQuery('');
+    setTurns((prev) => [
+      ...(reset ? [] : prev),
+      { id, question, answer: '', toolCalls: [], streaming: true, sql: null, result: null, groundedOn: null, pendingWrite: null, elapsedMs: null, error: null },
+    ]);
+
+    const controller = new AbortController();
+    abortRef.current = controller;
 
     try {
-      const response = await api.post(`/databases/${databaseId}/ask`, { query: q });
-      setResult(response.data);
-      addQuery(databaseId, q);
+      await streamAsk(
+        databaseId,
+        { query: question, reset },
+        (event, data) => {
+          if (event === 'token') {
+            updateTurn(id, (t) => ({ answer: t.answer + data.text }));
+          } else if (event === 'tool_end') {
+            updateTurn(id, (t) => ({ toolCalls: [...t.toolCalls, data] }));
+          } else if (event === 'done') {
+            updateTurn(id, {
+              streaming: false,
+              answer: data.answer,
+              toolCalls: data.tool_calls,
+              sql: data.sql,
+              result: data.result,
+              groundedOn: data.grounded_on,
+              pendingWrite: data.pending_write ? { sql: data.pending_write.sql } : null,
+              elapsedMs: data.total_execution_time_ms,
+            });
+          } else if (event === 'error') {
+            updateTurn(id, { streaming: false, error: data.detail, elapsedMs: Date.now() - started });
+          }
+        },
+        { signal: controller.signal }
+      );
+      addQuery(databaseId, question);
       setHistory(getHistory(databaseId));
+      setTablesRefreshKey((k) => k + 1);
     } catch (err) {
-      setError(getErrorMessage(err, 'Query failed. Please try again.'));
+      if (err.name !== 'AbortError') {
+        updateTurn(id, { streaming: false, error: err.message || 'Query failed.' });
+      }
     } finally {
+      updateTurn(id, (t) => (t.streaming ? { streaming: false } : {}));
       setLoading(false);
+      abortRef.current = null;
     }
   };
 
@@ -52,43 +128,47 @@ export default function AskPage() {
     runQuery(query);
   };
 
-  const handleHistoryClick = (q) => {
-    setQuery(q);
-    runQuery(q);
-  };
-
-  const handleCopySql = async () => {
-    if (!result?.sql) return;
+  const handleNewConversation = async () => {
     try {
-      await navigator.clipboard.writeText(result.sql);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1500);
-    } catch {
-      // clipboard API unavailable — ignore
-    }
-  };
-
-  const handleExport = async () => {
-    if (!result?.sql) {
-      setError('No SQL query to export');
+      await api.post(`/databases/${databaseId}/conversation/clear`);
+    } catch (err) {
+      setError(getErrorMessage(err, 'Could not clear the conversation.'));
       return;
     }
+    setTurns([]);
+  };
 
+  const handleConfirmWrite = async (turn) => {
+    updateTurn(turn.id, (t) => ({ pendingWrite: { ...t.pendingWrite, running: true, error: null } }));
+    try {
+      const response = await api.post(`/databases/${databaseId}/sql/confirm`, { sql: turn.pendingWrite.sql });
+      updateTurn(turn.id, (t) => ({
+        pendingWrite: null,
+        sql: t.pendingWrite.sql,
+        result: response.data,
+        answer: `${t.answer}\n\n✓ Executed.`,
+      }));
+      setTablesRefreshKey((k) => k + 1);
+    } catch (err) {
+      updateTurn(turn.id, (t) => ({
+        pendingWrite: { ...t.pendingWrite, running: false, error: getErrorMessage(err, 'Execution failed.') },
+      }));
+    }
+  };
+
+  const handleDismissWrite = (turn) => {
+    updateTurn(turn.id, (t) => ({ pendingWrite: null, answer: `${t.answer}\n\n✕ Cancelled.` }));
+  };
+
+  const handleExport = async (turn) => {
+    if (!turn.sql) return;
     try {
       const response = await api.post(
         `/databases/${databaseId}/export`,
-        { sql: result.sql, format: exportFormat },
+        { sql: turn.sql, format: exportFormat },
         { responseType: 'blob' }
       );
-
-      const url = window.URL.createObjectURL(new Blob([response.data]));
-      const link = document.createElement('a');
-      link.href = url;
-      link.setAttribute('download', `export.${exportFormat}`);
-      document.body.appendChild(link);
-      link.click();
-      link.parentElement.removeChild(link);
-      window.URL.revokeObjectURL(url);
+      downloadResponse(response, `export.${exportFormat}`);
     } catch (err) {
       setError(getErrorMessage(err, 'Export failed.'));
     }
@@ -96,19 +176,36 @@ export default function AskPage() {
 
   return (
     <Layout>
-      <div className="mb-6">
-        <Link to="/databases" className="text-sm text-brand-700 hover:underline">
-          ← All databases
-        </Link>
-        <h1 className="text-2xl font-bold text-gray-900 mt-1">
-          {selectedDatabase?.name || 'Database'}
-        </h1>
+      <div className="mb-6 flex items-end justify-between gap-4">
+        <div>
+          <Link to="/databases" className="text-sm text-brand-700 hover:underline">
+            ← All databases
+          </Link>
+          <h1 className="text-2xl font-bold text-gray-900 mt-1">
+            {selectedDatabase?.name || 'Database'}
+          </h1>
+        </div>
+        {turns.length > 0 && (
+          <button
+            onClick={handleNewConversation}
+            disabled={loading}
+            className="text-sm font-medium text-gray-500 hover:text-brand-700 disabled:opacity-50"
+          >
+            New conversation
+          </button>
+        )}
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-4 gap-6">
-        {/* History sidebar */}
-        <aside className="lg:col-span-1 order-2 lg:order-1">
-          <div className="bg-white rounded-2xl shadow-soft border border-gray-100 p-4 sticky top-20">
+        {/* Sidebar: tables + history */}
+        <aside className="lg:col-span-1 order-2 lg:order-1 space-y-6 lg:sticky lg:top-20 self-start">
+          <TablesPanel
+            databaseId={databaseId}
+            refreshKey={tablesRefreshKey}
+            onError={setError}
+            canWrite={canWrite}
+          />
+          <div className="bg-white rounded-2xl shadow-soft border border-gray-100 p-4">
             <div className="flex items-center justify-between mb-3">
               <h2 className="text-sm font-semibold text-gray-900">History</h2>
               {history.length > 0 && (
@@ -130,8 +227,9 @@ export default function AskPage() {
                 {history.map((h, idx) => (
                   <li key={idx}>
                     <button
-                      onClick={() => handleHistoryClick(h.query)}
-                      className="w-full text-left text-sm text-gray-600 hover:bg-brand-50 hover:text-brand-700 rounded-lg px-2 py-1.5 truncate transition"
+                      onClick={() => runQuery(h.query)}
+                      disabled={loading}
+                      className="w-full text-left text-sm text-gray-600 hover:bg-brand-50 hover:text-brand-700 rounded-lg px-2 py-1.5 truncate transition disabled:opacity-50"
                       title={h.query}
                     >
                       {h.query}
@@ -145,85 +243,58 @@ export default function AskPage() {
 
         {/* Main panel */}
         <div className="lg:col-span-3 order-1 lg:order-2 space-y-6">
-          <form onSubmit={handleAsk} className="bg-white rounded-2xl shadow-soft border border-gray-100 p-6">
-            <label className="block text-sm font-medium text-gray-700 mb-2">Ask a question</label>
-            <textarea
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              placeholder="e.g., Show me all customers who made purchases in the last 30 days"
-              className="w-full h-24 px-4 py-3 border border-gray-200 rounded-xl focus:ring-2 focus:ring-brand-500 focus:border-transparent outline-none transition resize-none"
-            />
-            <button
-              type="submit"
-              disabled={loading}
-              className="mt-4 flex items-center gap-2 bg-brand-600 hover:bg-brand-700 text-white font-medium px-6 py-2.5 rounded-xl transition disabled:opacity-50"
-            >
-              {loading && <Spinner className="h-4 w-4" />}
-              {loading ? 'Thinking...' : 'Ask'}
-            </button>
-          </form>
-
           {error && (
             <Banner type="error" onDismiss={() => setError('')}>
               {error}
             </Banner>
           )}
 
-          {result && (
-            <div className="bg-white rounded-2xl shadow-soft border border-gray-100 p-6 space-y-6">
-              <div>
-                <h2 className="text-sm font-semibold text-gray-900 mb-2">Answer</h2>
-                <p className="text-gray-700 whitespace-pre-wrap">{result.answer}</p>
-              </div>
-
-              {result.sql && (
-                <div>
-                  <div className="flex items-center justify-between mb-2">
-                    <h2 className="text-sm font-semibold text-gray-900">SQL</h2>
-                    <button
-                      onClick={handleCopySql}
-                      className="text-xs font-medium text-brand-700 hover:text-brand-800"
-                    >
-                      {copied ? 'Copied!' : 'Copy'}
-                    </button>
-                  </div>
-                  <pre className="bg-gray-900 text-brand-100 p-4 rounded-xl text-sm overflow-x-auto">
-                    <code>{result.sql}</code>
-                  </pre>
-                </div>
-              )}
-
-              <ReasoningSteps toolCalls={result.tool_calls} />
-
-              {result.result?.rows && (
-                <ResultsTable
-                  columns={result.result.columns}
-                  rows={result.result.rows}
+          {turns.length === 0 ? (
+            <div className="bg-white rounded-2xl shadow-soft border border-gray-100 p-8 text-center text-gray-400 text-sm">
+              Ask anything about this database. Follow-up questions build on the previous answer.
+            </div>
+          ) : (
+            <div className="space-y-6">
+              {turns.map((turn) => (
+                <TurnCard
+                  key={turn.id}
+                  turn={turn}
                   exportFormat={exportFormat}
                   onExportFormatChange={setExportFormat}
                   onExport={handleExport}
+                  onConfirmWrite={handleConfirmWrite}
+                  onDismissWrite={handleDismissWrite}
                 />
-              )}
-
-              {result.grounded_on && result.grounded_on.length > 0 && (
-                <div className="bg-brand-50 border border-brand-100 p-4 rounded-xl">
-                  <h3 className="text-sm font-semibold text-brand-800 mb-2">Grounded on</h3>
-                  <div className="space-y-1">
-                    {result.grounded_on.map((ref, idx) => (
-                      <div key={idx} className="text-sm text-brand-700">
-                        {ref.source}
-                        {ref.chapter && ` — ${ref.chapter}`}
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-
-              <div className="text-xs text-gray-400 pt-4 border-t border-gray-100">
-                Completed in {result.total_execution_time_ms}ms
-              </div>
+              ))}
+              <div ref={bottomRef} />
             </div>
           )}
+
+          <form onSubmit={handleAsk} className="bg-white rounded-2xl shadow-soft border border-gray-100 p-4 sticky bottom-4">
+            <textarea
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && !e.shiftKey) {
+                  e.preventDefault();
+                  runQuery(query);
+                }
+              }}
+              placeholder={turns.length ? 'Ask a follow-up…' : 'e.g., Show me all customers who made purchases in the last 30 days'}
+              className="w-full h-20 px-4 py-3 border border-gray-200 rounded-xl focus:ring-2 focus:ring-brand-500 focus:border-transparent outline-none transition resize-none text-sm"
+            />
+            <div className="mt-3 flex items-center justify-between">
+              <span className="text-xs text-gray-400">Enter to send · Shift+Enter for a new line</span>
+              <button
+                type="submit"
+                disabled={loading || !query.trim()}
+                className="flex items-center gap-2 bg-brand-600 hover:bg-brand-700 text-white font-medium px-5 py-2 rounded-xl transition disabled:opacity-50 text-sm"
+              >
+                {loading && <Spinner className="h-4 w-4" />}
+                {loading ? 'Thinking...' : 'Ask'}
+              </button>
+            </div>
+          </form>
         </div>
       </div>
     </Layout>

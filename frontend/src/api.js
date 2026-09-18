@@ -1,8 +1,10 @@
 import axios from 'axios';
 import { useAuthStore } from './store';
+import { API_BASE } from './apiBase';
 
 const api = axios.create({
-  baseURL: process.env.REACT_APP_API_URL || 'http://localhost:8000',
+  baseURL: API_BASE,
+  withCredentials: true,
 });
 
 api.interceptors.request.use((config) => {
@@ -30,7 +32,7 @@ api.interceptors.response.use(
         originalRequest.headers.Authorization = `Bearer ${token}`;
         return api(originalRequest);
       } else {
-        useAuthStore.getState().logout();
+        await useAuthStore.getState().logout();
         window.location.href = '/login';
       }
     }

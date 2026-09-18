@@ -1,4 +1,3 @@
-from typing import Any
 
 from app.models.mcp_tools import RunSqlResponse
 from app.services.export_strategy import ExportStrategyFactory
@@ -24,12 +23,12 @@ class ExportService:
         Returns:
             Exported data as bytes
         """
-        if not result.columns or not result.rows:
-            raise ValueError("Cannot export empty result set")
+        if not result.columns:
+            raise ValueError("Cannot export a result set with no columns")
 
         strategy = ExportStrategyFactory.create(format)
 
-        return await strategy.export(result.columns, result.rows)
+        return await strategy.export(result.columns, result.rows or [])
 
     @staticmethod
     def get_content_type(format: str) -> str:

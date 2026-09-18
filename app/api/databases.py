@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, Request, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 
 from app.api.dependencies import get_current_user
 from app.core.database import DatabaseManager
@@ -8,6 +8,7 @@ from app.models.contracts import (
     DatabaseCreateRequest,
     DatabaseResponse,
     PermissionGrantRequest,
+    PermissionResponse,
 )
 from app.services.database_registry import DatabaseRegistryService
 
@@ -76,13 +77,41 @@ async def share_database(
     service: DatabaseRegistryService = Depends(get_registry_service),
 ) -> Response:
     if request.access_level == AccessLevel.OWNER:
-        raise ValueError("OWNER cannot be granted")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="OWNER cannot be granted",
+        )
+
+    user_id = request.user_id or await service.resolve_user_id(request.email)
 
     await service.share(
         database_id=database_id,
         owner_id=current_user.id,
-        user_id=request.user_id,
+        user_id=user_id,
         access_level=request.access_level,
     )
 
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.get("/{database_id}/permissions", response_model=list[PermissionResponse])
+async def list_permissions(
+    database_id: str,
+    current_user: UserResponse = Depends(get_current_user),
+    service: DatabaseRegistryService = Depends(get_registry_service),
+) -> list[PermissionResponse]:
+    return await service.list_permissions(database_id, current_user.id)
+
+
+@router.delete(
+    "/{database_id}/permissions/{user_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def revoke_permission(
+    database_id: str,
+    user_id: str,
+    current_user: UserResponse = Depends(get_current_user),
+    service: DatabaseRegistryService = Depends(get_registry_service),
+) -> Response:
+    await service.revoke(database_id, current_user.id, user_id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)

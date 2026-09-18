@@ -1,34 +1,39 @@
+# Web
 fastapi
 uvicorn[standard]
 pydantic
 pydantic-settings
+email-validator
+python-multipart
+python-dotenv
+
+# Storage
 motor
 redis
 asyncpg
-python-dotenv
-PyJWT
-passlib[argon2]
-python-multipart
-httpx
+psycopg[binary]
 
-# MCP and LangChain agent
-mcp
+# Auth
+PyJWT
+passlib
+argon2-cffi
+
+# LLM agent + RAG
 langchain
 langchain-core
+langchain-classic
+langchain-community
+langchain-text-splitters
 langchain-google-genai
+langchain-postgres
 
-# RAG ingestion
-pypdf
-pgvector
+# SQL validation
+sqlparse
+
+# Export
+openpyxl>=3.0.0
 
 # Development
 pytest
 pytest-asyncio
 ruff
-
-mcp>=1.9.0, <2.0
-httpx-sse>=0.3.0
-
-openpyxl>=3.0.0
-python-multipart
-argon2_cffi

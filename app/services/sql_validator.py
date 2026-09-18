@@ -1,7 +1,7 @@
-import re
 from enum import Enum
 
 import sqlparse
+from sqlparse import tokens as T
 from fastapi import HTTPException, status
 
 
@@ -11,9 +11,6 @@ class SqlOperationType(str, Enum):
     UPDATE = "update"
     DELETE = "delete"
     CREATE = "create"
-    DROP = "drop"
-    ALTER = "alter"
-    UNKNOWN = "unknown"
 
 
 class SqlValidationError(HTTPException):
@@ -25,25 +22,48 @@ class SqlValidationError(HTTPException):
 
 
 class SQLValidator:
-    DANGEROUS_KEYWORDS = {
-        "DROP",
-        "TRUNCATE",
-        "GRANT",
-        "REVOKE",
-        "ALTER ROLE",
-        "ALTER USER",
+    """
+    Allow-list validator for user SQL.
+
+    Exactly one statement is permitted, and it must be a SELECT or (for write
+    access) INSERT/UPDATE/DELETE or CREATE TABLE/INDEX/VIEW. Data-modifying
+    CTEs count as writes. Every other statement type (DROP, ALTER, GRANT,
+    SET, COPY, CALL, DO, ...) is rejected.
+
+    Postgres itself enforces tenant isolation via per-tenant roles; this
+    class only decides what *kind* of statement may run.
+    """
+
+    WRITE_OPERATIONS = {
+        SqlOperationType.INSERT,
+        SqlOperationType.UPDATE,
+        SqlOperationType.DELETE,
+        SqlOperationType.CREATE,
     }
 
-    ALLOWED_READ_KEYWORDS = {"SELECT", "WITH"}
-    ALLOWED_WRITE_KEYWORDS = {
-        "INSERT",
-        "UPDATE",
-        "DELETE",
-        "WITH",
-    }
+    # The only object kinds CREATE may build. Modifiers that can sit between
+    # CREATE and the object kind are skipped when checking.
+    CREATABLE_OBJECTS = {"TABLE", "INDEX", "VIEW"}
+    CREATE_MODIFIERS = {"UNIQUE", "TEMP", "TEMPORARY", "UNLOGGED", "OR", "REPLACE", "MATERIALIZED"}
 
-    def __init__(self) -> None:
-        pass
+    # Functions that change session state or reach outside the database.
+    BLOCKED_FUNCTIONS = {
+        "set_config",
+        "pg_sleep",
+        "pg_sleep_for",
+        "pg_sleep_until",
+        "pg_read_file",
+        "pg_read_binary_file",
+        "pg_ls_dir",
+        "pg_stat_file",
+        "lo_import",
+        "lo_export",
+        "pg_terminate_backend",
+        "pg_cancel_backend",
+        "pg_reload_conf",
+        "dblink",
+        "dblink_exec",
+    }
 
     def validate_and_parse(
         self,
@@ -52,137 +72,118 @@ class SQLValidator:
     ) -> tuple[SqlOperationType, list[str]]:
         """
         Validate SQL and extract table names.
-        
-        Args:
-            sql: The SQL query string
-            allow_write: Whether to allow INSERT/UPDATE/DELETE
-            
+
         Returns:
             Tuple of (operation_type, table_names)
-            
+
         Raises:
             SqlValidationError: If SQL is invalid or unsafe
         """
-        sql = sql.strip()
-        if not sql:
+        cleaned = sqlparse.format(sql, strip_comments=True).strip().rstrip(";").strip()
+        if not cleaned:
             raise SqlValidationError("SQL query cannot be empty")
 
-        parsed = sqlparse.parse(sql)
-        if not parsed:
-            raise SqlValidationError("Failed to parse SQL")
+        statements = [s for s in sqlparse.parse(cleaned) if str(s).strip()]
+        if len(statements) != 1:
+            raise SqlValidationError("Exactly one SQL statement is allowed")
 
-        statement = parsed[0]
+        statement = statements[0]
+        flat = [t for t in statement.flatten() if not t.is_whitespace]
 
-        self._check_dangerous_keywords(statement.tokens)
+        self._check_blocked_functions(flat)
 
-        operation = self._extract_operation_type(statement)
+        operation = self._classify(statement, flat)
 
-        if operation in (
-            SqlOperationType.CREATE,
-            SqlOperationType.DROP,
-            SqlOperationType.ALTER,
-        ):
-            raise SqlValidationError("DDL operations are not allowed")
-
-        if not allow_write and operation in (
-            SqlOperationType.INSERT,
-            SqlOperationType.UPDATE,
-            SqlOperationType.DELETE,
-        ):
+        if operation in self.WRITE_OPERATIONS and not allow_write:
             raise SqlValidationError(
                 "Write operations are not allowed for this access level"
             )
 
-        tables = self._extract_table_names(statement)
+        return operation, self._extract_table_names(flat)
 
-        return operation, tables
+    @classmethod
+    def _classify(cls, statement, flat) -> SqlOperationType:
+        top = statement.get_type().upper()
 
-    @staticmethod
-    def _check_dangerous_keywords(tokens) -> None:
-        for token in tokens:
-            if token.ttype is None and hasattr(token, "tokens"):
-                SQLValidator._check_dangerous_keywords(token.tokens)
+        # sqlparse reports "CREATE OR REPLACE" as a single type/token.
+        if top.startswith("CREATE"):
+            top = "CREATE"
 
-            upper_value = str(token).upper().strip()
+        if top not in ("SELECT", "INSERT", "UPDATE", "DELETE", "CREATE"):
+            raise SqlValidationError(
+                f"Statement type '{top}' is not allowed; only SELECT, INSERT, UPDATE, DELETE and CREATE are permitted"
+            )
 
-            for keyword in SQLValidator.DANGEROUS_KEYWORDS:
-                if keyword in upper_value:
-                    raise SqlValidationError(
-                        f"SQL contains forbidden keyword: {keyword}"
-                    )
-
-    @staticmethod
-    def _extract_operation_type(statement) -> SqlOperationType:
-        first_token = None
-
-        for token in statement.tokens:
-            if token.ttype is not None and token.is_whitespace:
-                continue
-
-            first_token = str(token).upper().strip()
-            break
-
-        if first_token is None:
-            return SqlOperationType.UNKNOWN
-
-        if first_token.startswith("SELECT"):
-            return SqlOperationType.SELECT
-
-        if first_token.startswith("WITH"):
-            return SqlOperationType.SELECT
-
-        if first_token.startswith("INSERT"):
-            return SqlOperationType.INSERT
-
-        if first_token.startswith("UPDATE"):
-            return SqlOperationType.UPDATE
-
-        if first_token.startswith("DELETE"):
-            return SqlOperationType.DELETE
-
-        if first_token.startswith("CREATE"):
+        if top == "CREATE":
+            cls._check_create_target(flat)
             return SqlOperationType.CREATE
 
-        if first_token.startswith("DROP"):
-            return SqlOperationType.DROP
+        # Any DDL or other administrative keyword anywhere in the statement
+        # (e.g. inside a CTE or subquery) is rejected outright. Words that
+        # are legitimate inside DML (SET in UPDATE, LOCK in SELECT ... FOR
+        # UPDATE) are deliberately absent; as statements they are already
+        # rejected by the type check above.
+        for token in flat:
+            if token.ttype in T.Keyword.DDL:
+                raise SqlValidationError(f"DDL keyword '{token.value.upper()}' is not allowed")
+            if token.ttype in T.Keyword and token.value.upper() in (
+                "TRUNCATE", "GRANT", "REVOKE", "COPY", "VACUUM", "CALL",
+                "LISTEN", "NOTIFY", "REINDEX", "CLUSTER",
+            ):
+                raise SqlValidationError(f"Keyword '{token.value.upper()}' is not allowed")
 
-        if first_token.startswith("ALTER"):
-            return SqlOperationType.ALTER
+        # Data-modifying CTEs: `WITH x AS (DELETE ... RETURNING *) SELECT ...`
+        # parses as SELECT but writes. Any DML keyword promotes the whole
+        # statement to a write.
+        dml = {
+            t.value.upper()
+            for t in flat
+            if t.ttype in T.Keyword.DML and t.value.upper() in ("INSERT", "UPDATE", "DELETE")
+        }
+        if dml:
+            if "DELETE" in dml:
+                return SqlOperationType.DELETE
+            if "UPDATE" in dml:
+                return SqlOperationType.UPDATE
+            return SqlOperationType.INSERT
 
-        return SqlOperationType.UNKNOWN
+        return SqlOperationType.SELECT
+
+    @classmethod
+    def _check_create_target(cls, flat) -> None:
+        """CREATE may only build a TABLE, INDEX or VIEW; nothing else, and no nested DDL."""
+        # The leading token may be "CREATE" or "CREATE OR REPLACE"; split it
+        # so modifiers are handled uniformly.
+        words = [w for t in flat for w in t.value.upper().split()]
+        i = 1
+        while i < len(words) and words[i] in cls.CREATE_MODIFIERS:
+            i += 1
+        target = words[i] if i < len(words) else ""
+        if target not in cls.CREATABLE_OBJECTS:
+            raise SqlValidationError(
+                f"CREATE {target or '?'} is not allowed; only CREATE TABLE, INDEX and VIEW are permitted"
+            )
+
+        # A second DDL keyword after the leading CREATE (e.g. DROP inside a
+        # view body) is never legitimate here.
+        for token in flat[1:]:
+            if token.ttype in T.Keyword.DDL and not token.value.upper().startswith("CREATE"):
+                raise SqlValidationError(f"DDL keyword '{token.value.upper()}' is not allowed")
+
+    @classmethod
+    def _check_blocked_functions(cls, flat) -> None:
+        for i, token in enumerate(flat[:-1]):
+            if token.ttype in (T.Name, T.Keyword, T.Name.Builtin) and flat[i + 1].match(T.Punctuation, "("):
+                if token.value.lower() in cls.BLOCKED_FUNCTIONS:
+                    raise SqlValidationError(f"Function '{token.value}' is not allowed")
 
     @staticmethod
-    def _extract_table_names(statement) -> list[str]:
-        tables = set()
-
-        tokens = list(statement.flatten())
-
-        i = 0
-        while i < len(tokens):
-            token = tokens[i]
-
-            upper_val = str(token).upper().strip()
-
-            if upper_val in ("FROM", "INTO", "UPDATE", "JOIN", "INNER JOIN", "LEFT JOIN", "RIGHT JOIN", "FULL JOIN"):
-                i += 1
-
-                while i < len(tokens) and tokens[i].is_whitespace:
-                    i += 1
-
-                if i < len(tokens):
-                    table_name = str(tokens[i]).strip()
-
-                    if table_name and not table_name.upper() in (
-                        "WHERE",
-                        "GROUP",
-                        "ORDER",
-                        "LIMIT",
-                        "OFFSET",
-                        "AND",
-                        "OR",
-                    ):
-                        tables.add(table_name.split()[0])
-
-            i += 1
-
-        return list(tables)
+    def _extract_table_names(flat) -> list[str]:
+        """Best-effort table name extraction for logging; not used for authorization."""
+        tables: set[str] = set()
+        for i, token in enumerate(flat[:-1]):
+            if token.ttype in T.Keyword and token.value.upper() in ("FROM", "INTO", "UPDATE", "JOIN"):
+                nxt = flat[i + 1]
+                if nxt.ttype in (T.Name, None) and not nxt.match(T.Punctuation, "("):
+                    tables.add(nxt.value.strip('"'))
+        return sorted(tables)

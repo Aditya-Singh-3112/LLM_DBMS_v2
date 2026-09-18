@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   postgres:
     image: pgvector/pgvector:pg16
@@ -40,6 +38,35 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+
+  # Full-stack profile: `docker compose --profile app up --build`
+  api:
+    build: .
+    profiles: ["app"]
+    env_file: .env
+    environment:
+      POSTGRES_URI: postgresql://postgres:postgres@postgres:5432/llm_dbms
+      MONGO_URI: mongodb://mongodb:27017
+      REDIS_URI: redis://redis:6379/0
+      CORS_ORIGINS: http://localhost:3000
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres: { condition: service_healthy }
+      mongodb: { condition: service_healthy }
+      redis: { condition: service_healthy }
+
+  web:
+    build:
+      context: ./frontend
+      args:
+        # Same-origin through nginx so the auth cookie is first-party.
+        REACT_APP_API_URL: /api
+    profiles: ["app"]
+    ports:
+      - "3000:80"
+    depends_on:
+      - api
 
 volumes:
   postgres_data:

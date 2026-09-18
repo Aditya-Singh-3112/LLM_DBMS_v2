@@ -1,8 +1,21 @@
+from fastapi import HTTPException, status
+
 from app.core.database import DatabaseManager
 from app.models.mcp_tools import RunSqlResponse
 
 
 class PostgresExecutor:
+    """
+    Runs tenant-scoped SQL.
+
+    Every user-facing statement executes inside a transaction with
+    `SET LOCAL ROLE <tenant>` and `SET LOCAL search_path`, so both settings
+    are confined to that transaction and cannot leak to other users sharing
+    the pooled connection.
+    """
+
+    STATEMENT_TIMEOUT = "30s"
+
     def __init__(self, database_manager: DatabaseManager) -> None:
         self.database_manager = database_manager
 
@@ -10,29 +23,19 @@ class PostgresExecutor:
         self,
         sql: str,
         schema_name: str,
-        user_id: str,
     ) -> RunSqlResponse:
         """
-        Execute SQL in the tenant schema with RLS context.
-        
-        Args:
-            sql: The SQL query
-            schema_name: The tenant schema (e.g., tenant_<id>)
-            user_id: The current user's ID (set as RLS context)
-            
-        Returns:
-            Query results (columns and rows) or None if no rows returned
-        """
-        async with self.database_manager.postgres_connection() as connection:
-            await connection.execute(
-                f"SET search_path TO {schema_name}, public;"
-            )
-            await connection.execute(
-                f"SELECT set_config('app.current_user_id', $1, false);",
-                user_id,
-            )
+        Execute one SQL statement as the tenant role in the tenant schema.
 
-            rows = await connection.fetch(sql)
+        Returns columns and rows, or (None, None) when the statement produced
+        no result rows.
+        """
+        self.database_manager._validate_schema_name(schema_name)
+
+        async with self.database_manager.postgres_connection() as connection:
+            async with connection.transaction():
+                await self._enter_tenant(connection, schema_name)
+                rows = await connection.fetch(sql)
 
         if not rows:
             return RunSqlResponse(columns=None, rows=None)
@@ -69,7 +72,7 @@ class PostgresExecutor:
     ) -> list[tuple[str, str, bool]]:
         """
         Get column information for a table.
-        
+
         Returns list of (column_name, type, nullable)
         """
         async with self.database_manager.postgres_connection() as connection:
@@ -82,6 +85,12 @@ class PostgresExecutor:
                 """,
                 schema_name,
                 table_name,
+            )
+
+        if not rows:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Table '{table_name}' not found",
             )
 
         return [
@@ -97,18 +106,36 @@ class PostgresExecutor:
     ) -> tuple[list[str], list[list]]:
         """
         Sample rows from a table.
-        
+
         Returns (column_names, rows)
         """
-        async with self.database_manager.postgres_connection() as connection:
-            await connection.execute(
-                f"SET search_path TO {schema_name}, public;"
-            )
+        self.database_manager._validate_schema_name(schema_name)
 
-            rows = await connection.fetch(
-                f'SELECT * FROM "{table_name}" LIMIT $1',
-                limit,
-            )
+        async with self.database_manager.postgres_connection() as connection:
+            async with connection.transaction():
+                exists = await connection.fetchval(
+                    """
+                    SELECT 1 FROM information_schema.tables
+                    WHERE table_schema = $1 AND table_name = $2
+                    """,
+                    schema_name,
+                    table_name,
+                )
+                if not exists:
+                    raise HTTPException(
+                        status_code=status.HTTP_404_NOT_FOUND,
+                        detail=f"Table '{table_name}' not found",
+                    )
+
+                await self._enter_tenant(connection, schema_name)
+
+                # table_name is validated against IDENTIFIER_PATTERN by the
+                # request model and confirmed to exist above, so quoting it
+                # here is safe.
+                rows = await connection.fetch(
+                    f'SELECT * FROM "{table_name}" LIMIT $1',
+                    limit,
+                )
 
         if not rows:
             return [], []
@@ -117,3 +144,66 @@ class PostgresExecutor:
         rows_list = [list(row.values()) for row in rows]
 
         return columns, rows_list
+
+    async def import_rows(
+        self,
+        schema_name: str,
+        table_name: str,
+        columns: list[tuple[str, str]],
+        rows: list[list],
+        mode: str,
+    ) -> int:
+        """
+        Bulk-load rows into a tenant table.
+
+        mode: "create"  - table must not exist
+              "append"  - table must exist; columns are matched by name
+              "replace" - drop and recreate
+
+        Column names/types come from ImportService (validated identifiers and
+        a fixed allow-list of types), so interpolating them is safe.
+        """
+        self.database_manager._validate_schema_name(schema_name)
+        if mode not in ("create", "append", "replace"):
+            raise ValueError("mode must be create, append or replace")
+
+        col_defs = ", ".join(f'"{name}" {type_}' for name, type_ in columns)
+        col_names = [name for name, _ in columns]
+
+        async with self.database_manager.postgres_connection() as connection:
+            async with connection.transaction():
+                await self._enter_tenant(connection, schema_name)
+                await connection.execute("SET LOCAL statement_timeout = '10min'")
+
+                exists = await connection.fetchval(
+                    "SELECT 1 FROM information_schema.tables WHERE table_schema = $1 AND table_name = $2",
+                    schema_name, table_name,
+                )
+
+                if mode == "create" and exists:
+                    raise HTTPException(status.HTTP_409_CONFLICT, f"Table '{table_name}' already exists")
+                if mode == "append" and not exists:
+                    raise HTTPException(status.HTTP_404_NOT_FOUND, f"Table '{table_name}' not found")
+
+                if mode == "replace" and exists:
+                    await connection.execute(f'DROP TABLE "{table_name}"')
+                    exists = False
+
+                if not exists:
+                    await connection.execute(f'CREATE TABLE "{table_name}" ({col_defs})')
+
+                if rows:
+                    await connection.copy_records_to_table(
+                        table_name, records=rows, columns=col_names, schema_name=schema_name
+                    )
+
+        return len(rows)
+
+    async def _enter_tenant(self, connection, schema_name: str) -> None:
+        # schema_name already matched tenant_[a-f0-9]{24}, so it is safe to
+        # interpolate. SET LOCAL cannot take bind parameters.
+        await connection.execute(f'SET LOCAL ROLE "{schema_name}"')
+        await connection.execute(f'SET LOCAL search_path TO "{schema_name}"')
+        await connection.execute(
+            f"SET LOCAL statement_timeout = '{self.STATEMENT_TIMEOUT}'"
+        )

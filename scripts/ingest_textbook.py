@@ -2,140 +2,105 @@
 """
 Ingestion script for RAG textbook data.
 
-Usage:
-  python scripts/ingest_textbook.py --source "Database System Concepts, 7ed" --file textbook.md
+Usage (from the repo root):
+  python -m scripts.ingest_textbook --source "Database System Concepts, 7ed" --file textbook.md
 
-Uses LangChain's document loaders and text splitters.
+Uses the same embedding model, vector width and PGVector collection as
+app.services.rag_service, so what is ingested here is what retrieval sees.
 """
 
 import argparse
 import asyncio
+import sys
 from pathlib import Path
 
-from langchain_community.document_loaders import TextLoader
-from langchain_text_splitters import MarkdownHeaderTextSplitter
-from langchain_core.documents import Document
-from langchain_postgres import PGVector
-from langchain_google_genai import GoogleGenerativeAIEmbeddings
+# Allow `python scripts/ingest_textbook.py` as well as `python -m scripts.ingest_textbook`.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from app.core.config import get_settings
+from langchain_community.document_loaders import TextLoader  # noqa: E402
+from langchain_text_splitters import MarkdownHeaderTextSplitter  # noqa: E402
+
+from app.core.config import get_settings  # noqa: E402
+from app.services.rag_service import build_embeddings, build_vector_store  # noqa: E402
 
 
-async def ingest_textbook(
-    source: str,
-    file_path: str,
-) -> None:
+def _make_store():
+    settings = get_settings()
+    embeddings = build_embeddings(settings.google_api_key)
+    return build_vector_store(settings.postgres_uri, embeddings)
+
+
+async def ingest_textbook(source: str, file_path: str) -> None:
     """
-    Ingest a textbook file into the vector store using LangChain.
+    Ingest a markdown/text file into the vector store.
 
     Args:
         source: Human-readable source name (e.g., "Database System Concepts, ch.4")
         file_path: Path to the markdown or text file
     """
-    settings = get_settings()
-
     if not Path(file_path).exists():
         raise FileNotFoundError(f"File not found: {file_path}")
 
     print(f"Loading file: {file_path}")
-    loader = TextLoader(file_path, encoding="utf-8")
-    docs = loader.load()
-
+    docs = TextLoader(file_path, encoding="utf-8").load()
     print(f"File size: {len(docs[0].page_content)} characters")
 
     print("Chunking by markdown headers...")
-    headers_to_split_on = [
-        ("#", "Chapter"),
-        ("##", "Section"),
-        ("###", "Subsection"),
-    ]
-
     splitter = MarkdownHeaderTextSplitter(
-        headers_to_split_on=headers_to_split_on,
+        headers_to_split_on=[
+            ("#", "chapter"),
+            ("##", "section"),
+            ("###", "subsection"),
+        ],
         return_each_line=False,
         strip_headers=False,
     )
-
-    split_docs = splitter.split_documents(docs)
-
+    # MarkdownHeaderTextSplitter works on raw text and returns Documents
+    # whose metadata holds the header values named above.
+    split_docs = [
+        chunk
+        for doc in docs
+        for chunk in splitter.split_text(doc.page_content)
+    ]
     print(f"Created {len(split_docs)} chunks")
 
     for doc in split_docs:
         doc.metadata["source"] = source
 
-    print("Initializing embeddings...")
-    embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001")
-
     print("Creating vector store and ingesting...")
-    vector_store = PGVector(
-        collection_name="textbook_chunks",
-        connection_string=settings.postgres_uri,
-        embedding_function=embeddings,
-        use_jsonb=True,
-    )
-
+    vector_store = _make_store()
     ids = await vector_store.aadd_documents(split_docs)
 
-    print(f"\n✓ Ingestion complete!")
+    print("\n✓ Ingestion complete!")
     print(f"  Ingested {len(ids)} documents")
     print(f"  Source: {source}")
 
 
-async def test_retrieval(source: str, query: str) -> None:
+async def test_retrieval(query: str) -> None:
     """Quick test of retrieval quality."""
-    settings = get_settings()
-
     print(f"\nTesting retrieval for query: '{query}'")
 
-    embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001")
+    vector_store = _make_store()
+    results = await vector_store.asimilarity_search_with_score(query, k=3)
 
-    vector_store = PGVector(
-        collection_name="textbook_chunks",
-        connection_string=settings.postgres_uri,
-        embedding_function=embeddings,
-        use_jsonb=True,
-    )
-
-    retriever = vector_store.as_retriever(search_kwargs={"k": 3})
-
-    docs = await retriever.ainvoke(query)
-
-    if not docs:
+    if not results:
         print("  No results found!")
         return
 
-    for i, doc in enumerate(docs, 1):
-        print(f"\n  [{i}] {doc.metadata}")
+    for i, (doc, score) in enumerate(results, 1):
+        print(f"\n  [{i}] score={score:.4f} {doc.metadata}")
         print(f"      Content: {doc.page_content[:200]}...")
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="Ingest a textbook into the RAG system"
-    )
-    parser.add_argument(
-        "--source",
-        required=True,
-        help="Source name (e.g., 'Database System Concepts, 7ed')",
-    )
-    parser.add_argument(
-        "--file",
-        required=True,
-        help="Path to the markdown or text file",
-    )
-    parser.add_argument(
-        "--test-query",
-        help="Optional: test retrieval with a sample query after ingestion",
-    )
+    parser = argparse.ArgumentParser(description="Ingest a textbook into the RAG system")
+    parser.add_argument("--source", required=True, help="Source name (e.g., 'Database System Concepts, 7ed')")
+    parser.add_argument("--file", required=True, help="Path to the markdown or text file")
+    parser.add_argument("--test-query", help="Optional: test retrieval with a sample query after ingestion")
 
     args = parser.parse_args()
 
-    asyncio.run(
-        ingest_textbook(
-            source=args.source,
-            file_path=args.file,
-        )
-    )
+    asyncio.run(ingest_textbook(source=args.source, file_path=args.file))
 
     if args.test_query:
-        asyncio.run(test_retrieval(args.source, args.test_query))
+        asyncio.run(test_retrieval(args.test_query))
