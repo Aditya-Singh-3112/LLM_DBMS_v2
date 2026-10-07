@@ -1,60 +1,69 @@
-import React, { useEffect, useRef, useState } from 'react';
-import { useParams, Link } from 'react-router-dom';
-import { useDatabaseStore, useQueryHistoryStore } from '../store';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { useParams } from 'react-router-dom';
 import api, { getErrorMessage } from '../api';
 import { streamAsk } from '../streamAsk';
 import { downloadResponse } from '../download';
+import { pluralize } from '../format';
+import { useDatabase } from '../hooks/useDatabase';
 import Layout from '../components/Layout';
 import Banner from '../components/Banner';
 import Spinner from '../components/Spinner';
 import TablesPanel from '../components/TablesPanel';
 import TurnCard from '../components/TurnCard';
+import ConversationsPanel from '../components/ConversationsPanel';
+import DatabaseHeader from '../components/DatabaseHeader';
+import UndoBar from '../components/UndoBar';
 
 let nextTurnId = 1;
 
+const emptyTurn = (question) => ({
+  id: nextTurnId++,
+  question,
+  answer: '',
+  toolCalls: [],
+  streaming: false,
+  sql: null,
+  result: null,
+  groundedOn: null,
+  pendingWrite: null,
+  elapsedMs: null,
+  error: null,
+});
+
+/** Turn a stored conversation (alternating human / ai messages) into turns. */
+export function turnsFromMessages(messages) {
+  const turns = [];
+  for (const message of messages) {
+    if (message.role === 'human') {
+      turns.push(emptyTurn(message.content));
+    } else if (turns.length) {
+      Object.assign(turns[turns.length - 1], { answer: message.content, sql: message.sql || null });
+    }
+  }
+  return turns;
+}
+
 export default function AskPage() {
   const { databaseId } = useParams();
-  const selectedDatabase = useDatabaseStore((state) => state.selectedDatabase);
-  const setSelectedDatabase = useDatabaseStore((state) => state.setSelectedDatabase);
-  const addQuery = useQueryHistoryStore((state) => state.addQuery);
-  const getHistory = useQueryHistoryStore((state) => state.getHistory);
-  const clearHistory = useQueryHistoryStore((state) => state.clearHistory);
+  const { database, canWrite } = useDatabase(databaseId);
 
   const [query, setQuery] = useState('');
   const [turns, setTurns] = useState([]);
+  const [conversationId, setConversationId] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [exportFormat, setExportFormat] = useState('csv');
-  const [history, setHistory] = useState([]);
-  const [tablesRefreshKey, setTablesRefreshKey] = useState(0);
+  const [refreshKey, setRefreshKey] = useState(0);
+  const [conversationsKey, setConversationsKey] = useState(0);
   const bottomRef = useRef(null);
   const abortRef = useRef(null);
 
-  const canWrite =
-    selectedDatabase?.access_level === 'owner' || selectedDatabase?.access_level === 'write';
+  const refresh = () => setRefreshKey((k) => k + 1);
 
   useEffect(() => {
-    setHistory(getHistory(databaseId));
     setTurns([]);
-  }, [databaseId, getHistory]);
-
-  // The store is in-memory only, so after a page reload we no longer know
-  // which database this route refers to; look it up.
-  useEffect(() => {
-    if (selectedDatabase?.id === databaseId) return;
-    let cancelled = false;
-    api
-      .get('/databases')
-      .then((response) => {
-        if (cancelled) return;
-        const match = response.data.find((db) => db.id === databaseId);
-        if (match) setSelectedDatabase(match);
-      })
-      .catch(() => {});
-    return () => {
-      cancelled = true;
-    };
-  }, [databaseId, selectedDatabase, setSelectedDatabase]);
+    setConversationId(null);
+  }, [databaseId]);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
@@ -66,19 +75,16 @@ export default function AskPage() {
   const updateTurn = (id, patch) =>
     setTurns((prev) => prev.map((t) => (t.id === id ? { ...t, ...(typeof patch === 'function' ? patch(t) : patch) } : t)));
 
-  const runQuery = async (q, { reset = false } = {}) => {
+  const runQuery = async (q) => {
     const question = q.trim();
     if (!question || loading) return;
 
-    const id = nextTurnId++;
+    const turn = { ...emptyTurn(question), streaming: true };
     const started = Date.now();
     setError('');
     setLoading(true);
     setQuery('');
-    setTurns((prev) => [
-      ...(reset ? [] : prev),
-      { id, question, answer: '', toolCalls: [], streaming: true, sql: null, result: null, groundedOn: null, pendingWrite: null, elapsedMs: null, error: null },
-    ]);
+    setTurns((prev) => [...prev, turn]);
 
     const controller = new AbortController();
     abortRef.current = controller;
@@ -86,69 +92,78 @@ export default function AskPage() {
     try {
       await streamAsk(
         databaseId,
-        { query: question, reset },
+        { query: question, conversation_id: conversationId },
         (event, data) => {
           if (event === 'token') {
-            updateTurn(id, (t) => ({ answer: t.answer + data.text }));
+            updateTurn(turn.id, (t) => ({ answer: t.answer + data.text }));
           } else if (event === 'tool_end') {
-            updateTurn(id, (t) => ({ toolCalls: [...t.toolCalls, data] }));
+            updateTurn(turn.id, (t) => ({ toolCalls: [...t.toolCalls, data] }));
           } else if (event === 'done') {
-            updateTurn(id, {
+            setConversationId(data.conversation_id);
+            updateTurn(turn.id, {
               streaming: false,
               answer: data.answer,
               toolCalls: data.tool_calls,
               sql: data.sql,
               result: data.result,
               groundedOn: data.grounded_on,
-              pendingWrite: data.pending_write ? { sql: data.pending_write.sql } : null,
+              pendingWrite: data.pending_write,
               elapsedMs: data.total_execution_time_ms,
             });
           } else if (event === 'error') {
-            updateTurn(id, { streaming: false, error: data.detail, elapsedMs: Date.now() - started });
+            updateTurn(turn.id, { streaming: false, error: data.detail, elapsedMs: Date.now() - started });
           }
         },
         { signal: controller.signal }
       );
-      addQuery(databaseId, question);
-      setHistory(getHistory(databaseId));
-      setTablesRefreshKey((k) => k + 1);
+      setConversationsKey((k) => k + 1);
+      refresh();
     } catch (err) {
       if (err.name !== 'AbortError') {
-        updateTurn(id, { streaming: false, error: err.message || 'Query failed.' });
+        updateTurn(turn.id, { streaming: false, error: err.message || 'Query failed.' });
       }
     } finally {
-      updateTurn(id, (t) => (t.streaming ? { streaming: false } : {}));
+      updateTurn(turn.id, (t) => (t.streaming ? { streaming: false } : {}));
       setLoading(false);
       abortRef.current = null;
     }
   };
 
-  const handleAsk = (e) => {
-    e.preventDefault();
-    runQuery(query);
-  };
+  const openConversation = useCallback(
+    async (id) => {
+      try {
+        const response = await api.get(`/databases/${databaseId}/conversations/${id}`);
+        setConversationId(id);
+        setTurns(turnsFromMessages(response.data.messages));
+        setError('');
+      } catch (err) {
+        setError(getErrorMessage(err, 'Could not open the conversation.'));
+      }
+    },
+    [databaseId]
+  );
 
-  const handleNewConversation = async () => {
-    try {
-      await api.post(`/databases/${databaseId}/conversation/clear`);
-    } catch (err) {
-      setError(getErrorMessage(err, 'Could not clear the conversation.'));
-      return;
-    }
+  const newConversation = () => {
+    setConversationId(null);
     setTurns([]);
   };
 
   const handleConfirmWrite = async (turn) => {
     updateTurn(turn.id, (t) => ({ pendingWrite: { ...t.pendingWrite, running: true, error: null } }));
     try {
-      const response = await api.post(`/databases/${databaseId}/sql/confirm`, { sql: turn.pendingWrite.sql });
+      const response = await api.post(`/databases/${databaseId}/sql/confirm`, {
+        sql: turn.pendingWrite.sql,
+        conversation_id: conversationId,
+      });
+      const data = response.data;
+      const affected = data.rows_affected != null ? ` ${pluralize(data.rows_affected, 'row')} affected.` : '';
       updateTurn(turn.id, (t) => ({
         pendingWrite: null,
         sql: t.pendingWrite.sql,
-        result: response.data,
-        answer: `${t.answer}\n\n✓ Executed.`,
+        result: data.columns.length ? data : null,
+        answer: `${t.answer}\n\n✓ Executed.${affected}${data.undo_available ? ' You can undo it from the bar above.' : ''}`,
       }));
-      setTablesRefreshKey((k) => k + 1);
+      refresh();
     } catch (err) {
       updateTurn(turn.id, (t) => ({
         pendingWrite: { ...t.pendingWrite, running: false, error: getErrorMessage(err, 'Execution failed.') },
@@ -158,6 +173,25 @@ export default function AskPage() {
 
   const handleDismissWrite = (turn) => {
     updateTurn(turn.id, (t) => ({ pendingWrite: null, answer: `${t.answer}\n\n✕ Cancelled.` }));
+  };
+
+  const handleShowResults = async (turn) => {
+    try {
+      const response = await api.post(`/databases/${databaseId}/sql`, { sql: turn.sql });
+      updateTurn(turn.id, { result: response.data });
+    } catch (err) {
+      setError(getErrorMessage(err, 'Could not run that query again.'));
+    }
+  };
+
+  const handleSaveSql = async (sql) => {
+    const name = window.prompt('Name this query');
+    if (!name) return;
+    try {
+      await api.post(`/databases/${databaseId}/saved-queries`, { name, sql });
+    } catch (err) {
+      setError(getErrorMessage(err, 'Could not save the query.'));
+    }
   };
 
   const handleExport = async (turn) => {
@@ -176,78 +210,29 @@ export default function AskPage() {
 
   return (
     <Layout>
-      <div className="mb-6 flex items-end justify-between gap-4">
-        <div>
-          <Link to="/databases" className="text-sm text-brand-700 hover:underline">
-            ← All databases
-          </Link>
-          <h1 className="text-2xl font-bold text-gray-900 mt-1">
-            {selectedDatabase?.name || 'Database'}
-          </h1>
-        </div>
-        {turns.length > 0 && (
-          <button
-            onClick={handleNewConversation}
-            disabled={loading}
-            className="text-sm font-medium text-gray-500 hover:text-brand-700 disabled:opacity-50"
-          >
-            New conversation
-          </button>
-        )}
-      </div>
+      <DatabaseHeader databaseId={databaseId} database={database} />
 
       <div className="grid grid-cols-1 lg:grid-cols-4 gap-6">
-        {/* Sidebar: tables + history */}
         <aside className="lg:col-span-1 order-2 lg:order-1 space-y-6 lg:sticky lg:top-20 self-start">
-          <TablesPanel
+          <ConversationsPanel
             databaseId={databaseId}
-            refreshKey={tablesRefreshKey}
+            activeId={conversationId}
+            refreshKey={conversationsKey}
+            onOpen={openConversation}
+            onNew={newConversation}
             onError={setError}
-            canWrite={canWrite}
+            disabled={loading}
           />
-          <div className="bg-white rounded-2xl shadow-soft border border-gray-100 p-4">
-            <div className="flex items-center justify-between mb-3">
-              <h2 className="text-sm font-semibold text-gray-900">History</h2>
-              {history.length > 0 && (
-                <button
-                  onClick={() => {
-                    clearHistory(databaseId);
-                    setHistory([]);
-                  }}
-                  className="text-xs text-gray-400 hover:text-red-500"
-                >
-                  Clear
-                </button>
-              )}
-            </div>
-            {history.length === 0 ? (
-              <p className="text-xs text-gray-400">Your past questions will show up here.</p>
-            ) : (
-              <ul className="space-y-1 max-h-96 overflow-y-auto">
-                {history.map((h, idx) => (
-                  <li key={idx}>
-                    <button
-                      onClick={() => runQuery(h.query)}
-                      disabled={loading}
-                      className="w-full text-left text-sm text-gray-600 hover:bg-brand-50 hover:text-brand-700 rounded-lg px-2 py-1.5 truncate transition disabled:opacity-50"
-                      title={h.query}
-                    >
-                      {h.query}
-                    </button>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </div>
+          <TablesPanel databaseId={databaseId} refreshKey={refreshKey} onError={setError} canWrite={canWrite} />
         </aside>
 
-        {/* Main panel */}
         <div className="lg:col-span-3 order-1 lg:order-2 space-y-6">
           {error && (
             <Banner type="error" onDismiss={() => setError('')}>
               {error}
             </Banner>
           )}
+          <UndoBar databaseId={databaseId} refreshKey={refreshKey} canWrite={canWrite} onUndone={refresh} onError={setError} />
 
           {turns.length === 0 ? (
             <div className="bg-white rounded-2xl shadow-soft border border-gray-100 p-8 text-center text-gray-400 text-sm">
@@ -264,13 +249,21 @@ export default function AskPage() {
                   onExport={handleExport}
                   onConfirmWrite={handleConfirmWrite}
                   onDismissWrite={handleDismissWrite}
+                  onSaveSql={handleSaveSql}
+                  onShowResults={handleShowResults}
                 />
               ))}
               <div ref={bottomRef} />
             </div>
           )}
 
-          <form onSubmit={handleAsk} className="bg-white rounded-2xl shadow-soft border border-gray-100 p-4 sticky bottom-4">
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              runQuery(query);
+            }}
+            className="bg-white rounded-2xl shadow-soft border border-gray-100 p-4 sticky bottom-4"
+          >
             <textarea
               value={query}
               onChange={(e) => setQuery(e.target.value)}

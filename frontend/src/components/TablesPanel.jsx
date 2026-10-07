@@ -3,8 +3,9 @@ import api, { getErrorMessage } from '../api';
 import { downloadResponse } from '../download';
 import Spinner from './Spinner';
 import ImportModal from './ImportModal';
+import StorageMeter from './StorageMeter';
 
-export default function TablesPanel({ databaseId, refreshKey = 0, onError, canWrite = false }) {
+export default function TablesPanel({ databaseId, refreshKey = 0, onError, canWrite = false, selected, onSelect, onImported }) {
   const [showImport, setShowImport] = useState(false);
   const [tables, setTables] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -81,7 +82,10 @@ export default function TablesPanel({ databaseId, refreshKey = 0, onError, canWr
         <ImportModal
           databaseId={databaseId}
           onClose={() => setShowImport(false)}
-          onImported={() => fetchTables()}
+          onImported={() => {
+            fetchTables();
+            onImported?.();
+          }}
         />
       )}
 
@@ -95,9 +99,21 @@ export default function TablesPanel({ databaseId, refreshKey = 0, onError, canWr
         <ul className="space-y-1 max-h-64 overflow-y-auto">
           {tables.map((table) => (
             <li key={table} className="flex items-center justify-between gap-2">
-              <span className="text-sm text-gray-700 truncate" title={table}>
-                {table}
-              </span>
+              {onSelect ? (
+                <button
+                  onClick={() => onSelect(table)}
+                  title={table}
+                  className={`flex-1 min-w-0 text-left text-sm truncate rounded-lg px-2 py-1 ${
+                    selected === table ? 'bg-brand-50 text-brand-800 font-medium' : 'text-gray-700 hover:bg-brand-50'
+                  }`}
+                >
+                  {table}
+                </button>
+              ) : (
+                <span className="text-sm text-gray-700 truncate" title={table}>
+                  {table}
+                </span>
+              )}
               <button
                 onClick={() => handleDownload(table)}
                 disabled={downloading !== null}
@@ -116,6 +132,9 @@ export default function TablesPanel({ databaseId, refreshKey = 0, onError, canWr
           ))}
         </ul>
       )}
+      <div className="mt-4 pt-3 border-t border-gray-100">
+        <StorageMeter databaseId={databaseId} refreshKey={refreshKey} />
+      </div>
     </div>
   );
 }

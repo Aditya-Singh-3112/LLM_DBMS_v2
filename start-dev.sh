@@ -18,6 +18,10 @@ if command -v conda >/dev/null 2>&1; then
   conda activate "$CONDA_ENV"
 fi
 
+echo -e "${BLUE}Starting MCP server...${NC}"
+uvicorn app.mcp_server.main:app --reload --port 8001 &
+MCP_PID=$!
+
 echo -e "${BLUE}Starting backend...${NC}"
 uvicorn app.main:app --reload --port 8000 &
 BACKEND_PID=$!
@@ -28,13 +32,14 @@ FRONTEND_PID=$!
 
 cleanup() {
   echo -e "\n${BLUE}Stopping...${NC}"
-  kill "$BACKEND_PID" "$FRONTEND_PID" 2>/dev/null || true
-  wait "$BACKEND_PID" "$FRONTEND_PID" 2>/dev/null || true
+  kill "$MCP_PID" "$BACKEND_PID" "$FRONTEND_PID" 2>/dev/null || true
+  wait "$MCP_PID" "$BACKEND_PID" "$FRONTEND_PID" 2>/dev/null || true
 }
 trap cleanup INT TERM EXIT
 
 echo ""
 echo -e "${GREEN}Backend:  http://localhost:8000${NC}"
+echo -e "${GREEN}MCP:      http://localhost:8001/mcp${NC}"
 echo -e "${GREEN}Frontend: http://localhost:3000${NC}"
 echo "Press Ctrl+C to stop all services"
 wait

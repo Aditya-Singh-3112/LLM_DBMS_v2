@@ -14,6 +14,18 @@ const useAuthStore = create((set, get) => ({
 
   setUser: (user) => set({ user }),
 
+  // Re-read the signed-in user (e.g. after verifying the email address).
+  refreshUser: async () => {
+    const token = get().accessToken;
+    if (!token) return;
+    try {
+      const response = await fetch(`${API_BASE}/auth/me`, { headers: { Authorization: `Bearer ${token}` } });
+      if (response.ok) set({ user: await response.json() });
+    } catch {
+      // non-fatal
+    }
+  },
+
   logout: async () => {
     try {
       await fetch(`${API_BASE}/auth/logout`, {
@@ -82,32 +94,4 @@ const useDatabaseStore = create((set) => ({
     })),
 }));
 
-const HISTORY_LIMIT = 20;
-
-const useQueryHistoryStore = create((set, get) => ({
-  historyByDb: JSON.parse(localStorage.getItem('queryHistory') || '{}'),
-
-  addQuery: (databaseId, query) => {
-    const historyByDb = { ...get().historyByDb };
-    const existing = historyByDb[databaseId] || [];
-    const updated = [
-      { query, timestamp: Date.now() },
-      ...existing.filter((h) => h.query !== query),
-    ].slice(0, HISTORY_LIMIT);
-
-    historyByDb[databaseId] = updated;
-    localStorage.setItem('queryHistory', JSON.stringify(historyByDb));
-    set({ historyByDb });
-  },
-
-  getHistory: (databaseId) => get().historyByDb[databaseId] || [],
-
-  clearHistory: (databaseId) => {
-    const historyByDb = { ...get().historyByDb };
-    delete historyByDb[databaseId];
-    localStorage.setItem('queryHistory', JSON.stringify(historyByDb));
-    set({ historyByDb });
-  },
-}));
-
-export { useAuthStore, useDatabaseStore, useQueryHistoryStore };
+export { useAuthStore, useDatabaseStore };

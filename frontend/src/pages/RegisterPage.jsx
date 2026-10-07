@@ -25,7 +25,9 @@ export default function RegisterPage() {
 
     try {
       await api.post('/auth/register', { email, password });
-      navigate('/login');
+      navigate('/login', {
+        state: { notice: `Account created. We sent a verification link to ${email}; you can sign in now.` },
+      });
     } catch (err) {
       setError(getErrorMessage(err, 'Registration failed. Please try again.'));
     } finally {

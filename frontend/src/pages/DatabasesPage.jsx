@@ -68,9 +68,9 @@ export default function DatabasesPage() {
     }
   };
 
-  const handleSelect = (database) => {
+  const handleSelect = (database, view = 'ask') => {
     setSelectedDatabase(database);
-    navigate(`/databases/${database.id}/ask`);
+    navigate(`/databases/${database.id}/${view}`);
   };
 
   return (
@@ -143,7 +143,13 @@ export default function DatabasesPage() {
                   onClick={() => handleSelect(db)}
                   className="flex-1 bg-brand-600 hover:bg-brand-700 text-white font-medium py-2 rounded-xl transition"
                 >
-                  Query
+                  Ask
+                </button>
+                <button
+                  onClick={() => handleSelect(db, 'data')}
+                  className="bg-gray-50 hover:bg-gray-100 text-gray-700 font-medium px-4 py-2 rounded-xl transition"
+                >
+                  Data
                 </button>
                 {db.access_level === 'owner' && (
                   <button

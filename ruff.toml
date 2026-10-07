@@ -1,0 +1,2 @@
+# Matches the Dockerfile and CI runtime.
+target-version = "py312"

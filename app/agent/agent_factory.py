@@ -2,32 +2,28 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_classic.agents import create_tool_calling_agent, AgentExecutor
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 
-from app.agent.mcp_tool_adapter import MCPToolAdapter
-from app.agent.sql_reference_lookup_tool import (
-    SqlReferenceLookupTool,
-    create_sql_reference_lookup_tool,
-)
-from app.agent.tool_service_adapter import ToolServiceAdapter
-from app.services.rag_service import RAGService
+from app.agent.mcp_client import MCPToolClient
+from app.agent.mcp_tool_adapter import to_langchain_tools
+
+# Each /ask is about one database; the agent has no use for finding others.
+AGENT_EXCLUDED_TOOLS = {"list_databases"}
 
 
 class AgentFactory:
     """
-    Assembles the LangChain agent with database tools, RAG retrieval, and LLM.
+    Assembles the LangChain agent from the LLM and the tools an MCP
+    session advertised.
     """
 
     def __init__(
         self,
-        tool_client: ToolServiceAdapter,
-        rag_service: RAGService,
+        mcp_client: MCPToolClient,
         google_api_key: str,
         model: str = "gemini-3.5-flash-lite",
     ) -> None:
-        self.tool_client = tool_client
-        self.rag_service = rag_service
+        self.mcp_client = mcp_client
         self.google_api_key = google_api_key
         self.model = model
-        self.rag_tool: SqlReferenceLookupTool | None = None
 
     async def create_agent_executor(
         self,
@@ -50,14 +46,12 @@ class AgentFactory:
             google_api_key=self.google_api_key,
         )
 
-        adapter = MCPToolAdapter(self.tool_client)
-        db_tools = adapter.create_tools()
+        all_tools = [
+            tool for tool in to_langchain_tools(self.mcp_client)
+            if tool.name not in AGENT_EXCLUDED_TOOLS
+        ]
 
-        self.rag_tool = create_sql_reference_lookup_tool(self.rag_service)
-
-        all_tools = db_tools + [self.rag_tool.as_structured_tool()]
-
-        system_prompt = self._build_system_prompt(database_id)
+        system_prompt = self._build_system_prompt(database_id, all_tools)
 
         prompt = ChatPromptTemplate.from_messages(
             [
@@ -85,17 +79,16 @@ class AgentFactory:
         return executor
 
     @staticmethod
-    def _build_system_prompt(database_id: str) -> str:
+    def _build_system_prompt(database_id: str, tools: list) -> str:
+        tool_list = "\n".join(f"{i}. {t.name} - {t.description}" for i, t in enumerate(tools, 1))
+        # Descriptions come from the MCP server; the result is a prompt template.
+        tool_list = tool_list.replace("{", "{{").replace("}", "}}")
         return f"""You are an expert SQL assistant helping users query a PostgreSQL database using natural language.
 
 Database ID: {database_id}
 
-You have access to the following tools (always pass database_id="{database_id}"):
-1. list_schemas - List all tables in the database
-2. describe_table - Get column information for a specific table
-3. sample_rows - See sample data from a table
-4. run_sql - Execute a single SQL statement: SELECT, INSERT, UPDATE, DELETE, or CREATE TABLE/INDEX/VIEW (writes need write or owner access). Reference tables by bare name only (e.g. "orders"), never schema-qualified.
-5. sql_reference_lookup - Look up SQL/DBMS concepts in the textbook
+You have access to the following tools (always pass database_id="{database_id}" to those that take it):
+{tool_list}
 
 Your workflow:
 1. If you don't know which tables exist, call list_schemas first
@@ -105,6 +98,8 @@ Your workflow:
 5. Finally, call run_sql with the SQL query
 
 Writes (INSERT/UPDATE/DELETE/CREATE) are never executed directly: run_sql returns CONFIRMATION_REQUIRED and the user is shown a "Run anyway" button. When that happens, explain in plain words what the statement will do and stop; do not retry or rephrase it.
+
+Never end your turn by saying you will run a query: call run_sql in the same turn, then answer from its result.
 
 Always:
 - Ask clarifying questions if the user's request is ambiguous

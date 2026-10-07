@@ -2,6 +2,8 @@ import logging
 
 import re
 
+import sqlparse
+
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
@@ -11,13 +13,8 @@ from app.core.database import DatabaseManager
 from app.models.auth import UserResponse
 from app.models.export import ExportFormat, ExportRequest
 from app.models.mcp_tools import RunSqlRequest
-from app.services.database_registry import DatabaseRegistryService
 from app.services.export_service import ExportService
-from app.services.mcp_tools import MCPToolService
-from app.services.permission_service import PermissionService
-from app.services.postgres_executor import PostgresExecutor
-from app.services.cache_service import CacheService
-from app.services.rate_limiter import RateLimiter
+from app.services.mcp_tools import MCPToolService, build_tool_service
 from app.services.sql_validator import SqlOperationType, SQLValidator
 
 logger = logging.getLogger(__name__)
@@ -43,18 +40,7 @@ def get_tool_service(request: Request) -> MCPToolService:
     if db_manager.postgres_pool is None:
         raise RuntimeError("Postgres pool is not initialized")
 
-    registry_service = DatabaseRegistryService(
-        mongo_database=db_manager.mongo_database,
-        database_manager=db_manager,
-    )
-
-    return MCPToolService(
-        postgres_executor=PostgresExecutor(db_manager),
-        permission_service=PermissionService(registry_service),
-        mongo_database=db_manager.mongo_database,
-        cache_service=CacheService(redis=db_manager.redis),
-        rate_limiter=RateLimiter(redis=db_manager.redis, calls_per_minute=60),
-    )
+    return build_tool_service(db_manager)
 
 
 @router.post("/{database_id}/export")
@@ -103,6 +89,23 @@ async def export_query(
     return file_response(exported_bytes, export_request.format, filename)
 
 
+def cap_select(sql: str, limit: int) -> str:
+    """
+    Limit a SELECT to `limit` rows. Wrapping rather than appending LIMIT keeps
+    queries that already end in ';' or LIMIT valid. Anything else (or anything
+    the validator rejects) is returned unchanged so run_sql reports the real
+    error.
+    """
+    try:
+        operation, _ = SQLValidator().validate_and_parse(sql, allow_write=True, allow_schema_changes=True)
+    except Exception:
+        operation = None
+    if operation is SqlOperationType.SELECT:
+        inner = sqlparse.format(sql, strip_comments=True).strip().rstrip(";")
+        return f"SELECT * FROM ({inner}) AS _capped LIMIT {limit}"
+    return sql
+
+
 def file_response(data: bytes, format: ExportFormat, filename: str) -> StreamingResponse:
     safe_name = re.sub(r"[^A-Za-z0-9._-]", "_", filename)
     return StreamingResponse(
@@ -122,17 +125,7 @@ async def export_preview(
     """
     Preview the first rows of a query without exporting.
     """
-    # Wrap SELECTs rather than appending LIMIT, so queries that already end
-    # in ';' or LIMIT remain valid. Anything else (or anything the validator
-    # rejects) is passed through unchanged so run_sql reports the real error.
-    sql = export_request.sql
-    try:
-        operation, _ = SQLValidator().validate_and_parse(sql, allow_write=True)
-    except Exception:
-        operation = None
-    if operation is SqlOperationType.SELECT:
-        inner = sql.strip().rstrip(";")
-        sql = f"SELECT * FROM ({inner}) AS _preview LIMIT {PREVIEW_ROWS}"
+    sql = cap_select(export_request.sql, PREVIEW_ROWS)
 
     result = await tool_service.run_sql(
         RunSqlRequest(database_id=database_id, sql=sql),

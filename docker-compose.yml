@@ -40,6 +40,23 @@ services:
       retries: 5
 
   # Full-stack profile: `docker compose --profile app up --build`
+  mcp:
+    build: .
+    profiles: ["app"]
+    command: ["uvicorn", "app.mcp_server.main:app", "--host", "0.0.0.0", "--port", "8001"]
+    env_file: .env
+    environment:
+      POSTGRES_URI: postgresql://postgres:postgres@postgres:5432/llm_dbms
+      MONGO_URI: mongodb://mongodb:27017
+      REDIS_URI: redis://redis:6379/0
+    # Published so other MCP clients can connect with an access token.
+    ports:
+      - "8001:8001"
+    depends_on:
+      postgres: { condition: service_healthy }
+      mongodb: { condition: service_healthy }
+      redis: { condition: service_healthy }
+
   api:
     build: .
     profiles: ["app"]
@@ -48,6 +65,7 @@ services:
       POSTGRES_URI: postgresql://postgres:postgres@postgres:5432/llm_dbms
       MONGO_URI: mongodb://mongodb:27017
       REDIS_URI: redis://redis:6379/0
+      MCP_SERVER_URL: http://mcp:8001/mcp
       CORS_ORIGINS: http://localhost:3000
     ports:
       - "8000:8000"
@@ -55,6 +73,7 @@ services:
       postgres: { condition: service_healthy }
       mongodb: { condition: service_healthy }
       redis: { condition: service_healthy }
+      mcp: { condition: service_started }
 
   web:
     build:

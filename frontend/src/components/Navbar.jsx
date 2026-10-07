@@ -18,8 +18,16 @@ export default function Navbar() {
         </Link>
         <div className="flex items-center gap-4">
           {user?.email && (
-            <span className="hidden sm:block text-sm text-gray-500">{user.email}</span>
+            <Link to="/account" className="hidden sm:flex items-center gap-2 text-sm text-gray-500 hover:text-brand-700">
+              {user.email}
+              {!user.email_verified && (
+                <span className="text-xs font-medium px-2 py-0.5 rounded-full bg-amber-100 text-amber-700">verify email</span>
+              )}
+            </Link>
           )}
+          <Link to="/account" className="sm:hidden text-sm font-medium text-gray-600 hover:text-brand-700">
+            Account
+          </Link>
           <button
             onClick={async () => {
               await logout();

@@ -6,8 +6,11 @@ from app.core.security import decode_access_token
 from app.services.auth import AuthService
 from app.core.config import Settings, get_settings
 from app.models.auth import (
+    ForgotPasswordRequest,
     MessageResponse,
     RefreshRequest,
+    ResetPasswordRequest,
+    TokenRequest,
     TokenResponse,
     UserCreateRequest,
     UserLoginRequest,
@@ -36,6 +39,14 @@ def _set_refresh_cookie(response: Response, token: str, settings: Settings) -> N
     )
 
 
+def set_refresh_cookie(response: Response, token: str) -> None:
+    _set_refresh_cookie(response, token, get_settings())
+
+
+def clear_refresh_cookie(response: Response) -> None:
+    _clear_refresh_cookie(response, get_settings())
+
+
 def _clear_refresh_cookie(response: Response, settings: Settings) -> None:
     response.delete_cookie(
         key=REFRESH_COOKIE,
@@ -62,7 +73,8 @@ def get_auth_service(request: Request) -> AuthService:
 
     return AuthService(
         database = database_manager.mongo_database,
-        settings = get_settings()
+        settings = get_settings(),
+        redis = database_manager.redis,
     )
 
 @router.post("/register", response_model = UserResponse, status_code = status.HTTP_201_CREATED)
@@ -73,9 +85,12 @@ async def register(request: UserCreateRequest,
 @router.post("/login", response_model = TokenResponse)
 async def login(request: UserLoginRequest,
                 response: Response,
+                http_request: Request,
                 auth_service: AuthService = Depends(get_auth_service)
 ) -> TokenResponse:
-    tokens = await auth_service.login(request)
+    # Behind a proxy, run uvicorn with --proxy-headers so this is the client.
+    client_ip = http_request.client.host if http_request.client else None
+    tokens = await auth_service.login(request, client_ip)
     _set_refresh_cookie(response, tokens.refresh_token, get_settings())
     return tokens
 
@@ -129,4 +144,31 @@ async def get_me(
             headers={"WWW-Authenticate": "Bearer"},
         ) from error
 
-    return await auth_service.get_user(payload["sub"])
+    return await auth_service.get_user_for_token(payload["sub"], payload.get("iat"))
+
+
+@router.post("/verify-email", response_model=MessageResponse)
+async def verify_email(
+    request: TokenRequest,
+    auth_service: AuthService = Depends(get_auth_service),
+) -> MessageResponse:
+    await auth_service.verify_email(request.token)
+    return MessageResponse(message="Your email address is verified")
+
+
+@router.post("/password/forgot", response_model=MessageResponse, status_code=status.HTTP_202_ACCEPTED)
+async def forgot_password(
+    request: ForgotPasswordRequest,
+    auth_service: AuthService = Depends(get_auth_service),
+) -> MessageResponse:
+    await auth_service.request_password_reset(request.email)
+    return MessageResponse(message="If an account uses that address, we've emailed it a reset link")
+
+
+@router.post("/password/reset", response_model=MessageResponse)
+async def reset_password(
+    request: ResetPasswordRequest,
+    auth_service: AuthService = Depends(get_auth_service),
+) -> MessageResponse:
+    await auth_service.reset_password(request.token, request.new_password)
+    return MessageResponse(message="Your password was reset; sign in with the new one")

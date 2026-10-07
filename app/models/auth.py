@@ -15,6 +15,7 @@ class UserResponse(BaseModel):
     id: str
     email: EmailStr
     is_active: bool
+    email_verified: bool = False
     created_at: datetime
 
 class TokenResponse(BaseModel):
@@ -30,3 +31,20 @@ class RefreshRequest(BaseModel):
 
 class MessageResponse(BaseModel):
     message: str
+
+class TokenRequest(BaseModel):
+    token: str = Field(min_length = 1, max_length = 512)
+
+class ForgotPasswordRequest(BaseModel):
+    email: EmailStr
+
+class ResetPasswordRequest(BaseModel):
+    token: str = Field(min_length = 1, max_length = 512)
+    new_password: str = Field(min_length = 8, max_length = 128)
+
+class ChangePasswordRequest(BaseModel):
+    current_password: str
+    new_password: str = Field(min_length = 8, max_length = 128)
+
+class DeleteAccountRequest(BaseModel):
+    password: str

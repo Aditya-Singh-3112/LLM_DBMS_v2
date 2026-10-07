@@ -18,6 +18,10 @@ PyJWT
 passlib
 argon2-cffi
 
+# MCP server (app/mcp_server) and client (app/agent/mcp_client.py)
+mcp>=1.30,<2
+httpx
+
 # LLM agent + RAG
 langchain
 langchain-core
@@ -32,6 +36,9 @@ sqlparse
 
 # Export
 openpyxl>=3.0.0
+
+# Metrics
+prometheus-client
 
 # Development
 pytest

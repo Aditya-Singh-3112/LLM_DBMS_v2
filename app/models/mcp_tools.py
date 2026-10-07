@@ -19,6 +19,7 @@ class ColumnInfo(BaseModel):
     name: str
     type: str
     nullable: bool
+    primary_key: bool = False
 
 class DescribeTableResponse(BaseModel):
     table_name: str
@@ -42,6 +43,25 @@ class RunSqlRequest(BaseModel):
 class RunSqlResponse(BaseModel):
     columns: list[str] | None
     rows: list[list[Any]] | None
+    # Set for executed writes only.
+    rows_affected: int | None = None
+    undo_available: bool | None = None
+
+class BrowseRowsRequest(BaseModel):
+    database_id: str
+    table_name: str = Field(pattern=IDENTIFIER_PATTERN)
+    offset: int = Field(default=0, ge=0)
+    limit: int = Field(default=50, ge=1, le=500)
+    order_by: str | None = None
+    descending: bool = False
+
+class BrowseRowsResponse(BaseModel):
+    columns: list[str]
+    rows: list[list[Any]]
+    total: int
+
+class UndoRequest(BaseModel):
+    database_id: str
 
 class ToolError(BaseModel):
     code: str

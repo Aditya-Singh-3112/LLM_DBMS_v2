@@ -116,8 +116,9 @@ class DatabaseRegistryService:
         await self.permissions.delete_many(
             {"database_id": database_id}
         )
-        await self.mongo_database["conversations"].delete_many({"database_id": database_id})
-        await self.mongo_database["tool_call_logs"].delete_many({"database_id": database_id})
+        for collection in ("conversations", "tool_call_logs", "saved_queries"):
+            await self.mongo_database[collection].delete_many({"database_id": database_id})
+        await self.mongo_database["undo_log"].delete_one({"_id": database_id})
         await self.databases.delete_one(
             {"_id": ObjectId(database_id)}
         )
@@ -168,6 +169,21 @@ class DatabaseRegistryService:
                 detail="The owner already has full access",
             )
 
+        # New grants only go to addresses whose owner has proven they hold
+        # them; otherwise anyone could register an address and receive what
+        # is shared with it. Existing grants can still be changed.
+        existing = await self.permissions.find_one({"database_id": database_id, "user_id": user_id})
+        if existing is None:
+            user = await self.users.find_one({"_id": ObjectId(user_id)}) if ObjectId.is_valid(user_id) else None
+            if user is None:
+                raise HTTPException(status.HTTP_404_NOT_FOUND, "No account with that id")
+            if not user.get("email_verified"):
+                raise HTTPException(
+                    status.HTTP_409_CONFLICT,
+                    "That person hasn't verified their email address yet. Ask them to "
+                    "check their inbox (or resend the link from their account page), then share again.",
+                )
+
         await self.permissions.update_one(
             {
                 "database_id": database_id,
@@ -186,6 +202,12 @@ class DatabaseRegistryService:
             },
             upsert=True,
         )
+
+    async def owned_database_ids(self, owner_id: str) -> list[str]:
+        return [str(d["_id"]) async for d in self.databases.find({"owner_id": owner_id}, {"_id": 1})]
+
+    async def remove_grants_to(self, user_id: str) -> None:
+        await self.permissions.delete_many({"user_id": user_id})
 
     async def resolve_user_id(self, email: str) -> str:
         user = await self.users.find_one({"email": email.lower(), "is_active": True})

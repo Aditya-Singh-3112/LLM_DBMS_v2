@@ -3,19 +3,25 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.api.account import router as account_router
 from app.api.ask import router as ask_router
 from app.api.auth import router as auth_router
 from app.api.databases import router as databases_router
 from app.api.export import router as export_router
 from app.api.health import router as health_router
+from app.api.history import router as history_router
 from app.api.tables import router as tables_router
 from app.core.config import get_settings
 from app.core.database import DatabaseManager
+from app.core.metrics import MetricsMiddleware, metrics_endpoint
+from app.core.migrations import run_migrations
 from app.core.observability import RequestIdMiddleware, configure_logging, install_error_handlers
+from app.services.audit_service import AuditService
 from app.services.auth import AuthService
 from app.services.conversation_service import ConversationService
 from app.services.database_registry import DatabaseRegistryService
-from app.services.rag_service import RAGService
+from app.services.saved_query_service import SavedQueryService
+from app.services.usage_service import UsageService
 
 settings = get_settings()
 configure_logging(json_logs=settings.app_env != "development", debug=settings.debug)
@@ -27,6 +33,8 @@ async def lifespan(app: FastAPI):
     await database_manager.connect()
     app.state.database_manager = database_manager
 
+    await run_migrations(database_manager)
+
     await AuthService(
         database=database_manager.mongo_database,
         settings=settings,
@@ -37,15 +45,11 @@ async def lifespan(app: FastAPI):
         database_manager=database_manager,
     ).initialize()
 
-    await ConversationService(database_manager.mongo_database).initialize()
+    for service in (ConversationService, SavedQueryService, AuditService, UsageService):
+        await service(database_manager.mongo_database).initialize()
 
-    rag_service = RAGService(
-        database_manager=database_manager,
-        redis=database_manager.redis,
-    )
-    await rag_service.initialize()
-    app.state.rag_service = rag_service
-
+    # The agent's tools, including textbook retrieval, live in the MCP
+    # server process (app/mcp_server); this API reaches them as a client.
     yield
 
     await database_manager.disconnect()
@@ -70,8 +74,14 @@ app.add_middleware(
     expose_headers=["Content-Disposition"],
 )
 
+if settings.metrics_enabled:
+    app.add_middleware(MetricsMiddleware)
+    app.add_route("/metrics", metrics_endpoint, include_in_schema=False)
+
 app.include_router(health_router)
 app.include_router(auth_router)
+app.include_router(account_router)
+app.include_router(history_router)
 app.include_router(databases_router)
 app.include_router(ask_router)
 app.include_router(export_router)

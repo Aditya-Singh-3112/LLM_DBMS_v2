@@ -93,3 +93,64 @@ def test_table_names_extracted(validator):
         "SELECT * FROM customers c JOIN orders o ON o.customer_id = c.id"
     )
     assert tables == ["customers", "orders"]
+
+
+@pytest.mark.parametrize(
+    "sql, expected",
+    [
+        ("ALTER TABLE t ADD COLUMN x int", SqlOperationType.ALTER),
+        ("ALTER TABLE IF EXISTS t DROP COLUMN x", SqlOperationType.ALTER),
+        ("ALTER TABLE t RENAME TO u", SqlOperationType.ALTER),
+        ("DROP TABLE IF EXISTS a, b CASCADE", SqlOperationType.DROP),
+        ("DROP VIEW v", SqlOperationType.DROP),
+        ("DROP MATERIALIZED VIEW m", SqlOperationType.DROP),
+        ("DROP INDEX i", SqlOperationType.DROP),
+        ("TRUNCATE TABLE a, b RESTART IDENTITY", SqlOperationType.TRUNCATE),
+    ],
+)
+def test_schema_changes_need_owner_access(validator, sql, expected):
+    with pytest.raises(SqlValidationError, match="only allowed for the database owner"):
+        validator.validate_and_parse(sql, allow_write=True)
+    operation, _ = validator.validate_and_parse(sql, allow_write=True, allow_schema_changes=True)
+    assert operation is expected
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "ALTER TABLE t OWNER TO postgres",
+        "ALTER TABLE t SET SCHEMA public",
+        "ALTER TABLE t SET TABLESPACE pg_default",
+        "ALTER ROLE r SUPERUSER",
+        "ALTER SCHEMA s RENAME TO x",
+        "DROP SCHEMA s",
+        "DROP ROLE r",
+        "DROP FUNCTION f",
+        "DROP EXTENSION vector",
+        "ALTER TABLE t ADD COLUMN x int; DROP TABLE t",
+    ],
+)
+def test_dangerous_ddl_rejected_even_for_owners(validator, sql):
+    with pytest.raises(SqlValidationError):
+        validator.validate_and_parse(sql, allow_write=True, allow_schema_changes=True)
+
+
+@pytest.mark.parametrize(
+    "sql, targets",
+    [
+        ("INSERT INTO s.t (a) VALUES (1)", ["t"]),
+        ('UPDATE "Foo" SET a = 1', ["Foo"]),
+        ("UPDATE Orders o SET x = 1 FROM items WHERE o.id = items.id", ["orders"]),
+        ("DELETE FROM t WHERE a = 1", ["t"]),
+        ("WITH d AS (DELETE FROM t RETURNING *) INSERT INTO archive SELECT * FROM d", ["t", "archive"]),
+        ("INSERT INTO t SELECT * FROM s", ["t"]),
+        ("TRUNCATE a, b", ["a", "b"]),
+        ('DROP TABLE IF EXISTS a, "B"', ["a", "B"]),
+        ("ALTER TABLE ONLY t ADD COLUMN x int", ["t"]),
+        ("CREATE TABLE n (id int)", []),
+        ("SELECT * FROM t", []),
+    ],
+)
+def test_write_targets(validator, sql, targets):
+    parsed = validator.parse(sql, allow_write=True, allow_schema_changes=True)
+    assert parsed.write_targets == targets

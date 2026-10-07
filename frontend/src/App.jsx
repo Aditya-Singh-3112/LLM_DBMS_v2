@@ -10,6 +10,11 @@ import LoginPage from './pages/LoginPage';
 import RegisterPage from './pages/RegisterPage';
 import DatabasesPage from './pages/DatabasesPage';
 import AskPage from './pages/AskPage';
+import DataPage from './pages/DataPage';
+import AccountPage from './pages/AccountPage';
+import ForgotPasswordPage from './pages/ForgotPasswordPage';
+import ResetPasswordPage from './pages/ResetPasswordPage';
+import VerifyEmailPage from './pages/VerifyEmailPage';
 import Spinner from './components/Spinner';
 
 function PrivateRoute({ children }) {
@@ -38,6 +43,25 @@ export default function App() {
       <Routes>
         <Route path="/login" element={<LoginPage />} />
         <Route path="/register" element={<RegisterPage />} />
+        <Route path="/forgot-password" element={<ForgotPasswordPage />} />
+        <Route path="/reset-password" element={<ResetPasswordPage />} />
+        <Route path="/verify-email" element={<VerifyEmailPage />} />
+        <Route
+          path="/account"
+          element={
+            <PrivateRoute>
+              <AccountPage />
+            </PrivateRoute>
+          }
+        />
+        <Route
+          path="/databases/:databaseId/data"
+          element={
+            <PrivateRoute>
+              <DataPage />
+            </PrivateRoute>
+          }
+        />
         <Route
           path="/databases"
           element={

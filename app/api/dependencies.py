@@ -25,4 +25,4 @@ async def get_current_user(request: Request,
             headers={"WWW-Authenticate": "Bearer"},
         ) from error
 
-    return await auth_service.get_user(payload["sub"])
+    return await auth_service.get_user_for_token(payload["sub"], payload.get("iat"))

@@ -144,7 +144,7 @@ async def test_ask_runs_tools_and_returns_result(client, owner, seeded, fake_age
     body = r.json()
     assert body["answer"] == "Two customers are in Pune."
     assert body["sql"].startswith("SELECT name FROM customers")
-    assert body["result"] == {"columns": ["name"], "rows": [["Ann"], ["Cy"]]}
+    assert (body["result"]["columns"], body["result"]["rows"]) == (["name"], [["Ann"], ["Cy"]])
     assert [t["status"] for t in body["tool_calls"]] == ["success", "success"]
     assert body["pending_write"] is None
 
@@ -156,7 +156,10 @@ async def test_ask_write_requires_confirmation(client, owner, seeded, fake_agent
     r = await client.post(f"/databases/{seeded}/ask", json={"query": "delete bob"}, headers=owner.headers)
     assert r.status_code == 200, r.text
     body = r.json()
-    assert body["pending_write"] == {"sql": sql}
+    assert body["pending_write"] == {
+        "sql": sql, "operation": "delete", "rows_affected": 1,
+        "undo_available": True, "undo_unavailable_reason": None,
+    }
     assert body["tool_calls"][0]["status"] == "pending"
 
     # nothing happened yet
@@ -173,28 +176,32 @@ async def test_ask_write_requires_confirmation(client, owner, seeded, fake_agent
     assert r.json()["rows"] == [[2]]
 
 
-async def test_conversation_memory_is_passed_and_clearable(client, owner, seeded, fake_agent, monkeypatch):
+async def test_conversation_memory_follows_conversation_id(client, owner, seeded, fake_agent, monkeypatch):
     captured = {}
 
     from tests.conftest import FakeExecutor
 
     orig = FakeExecutor.ainvoke
 
-    async def spy(self, inputs):
+    async def spy(self, inputs, config=None):
         captured["history"] = inputs.get("chat_history")
-        return await orig(self, inputs)
+        return await orig(self, inputs, config)
 
     monkeypatch.setattr(FakeExecutor, "ainvoke", spy)
     fake_agent(script=[], answer="ok")
 
-    await client.post(f"/databases/{seeded}/ask", json={"query": "first"}, headers=owner.headers)
+    r = await client.post(f"/databases/{seeded}/ask", json={"query": "first"}, headers=owner.headers)
     assert captured["history"] == []
-    await client.post(f"/databases/{seeded}/ask", json={"query": "second"}, headers=owner.headers)
+    conversation_id = r.json()["conversation_id"]
+    await client.post(
+        f"/databases/{seeded}/ask", json={"query": "second", "conversation_id": conversation_id}, headers=owner.headers
+    )
     assert [m.content for m in captured["history"]] == ["first", "ok"]
 
-    assert (await client.post(f"/databases/{seeded}/conversation/clear", headers=owner.headers)).status_code == 204
-    await client.post(f"/databases/{seeded}/ask", json={"query": "third"}, headers=owner.headers)
+    # Omitting the id starts a new conversation.
+    r = await client.post(f"/databases/{seeded}/ask", json={"query": "third"}, headers=owner.headers)
     assert captured["history"] == []
+    assert r.json()["conversation_id"] != conversation_id
 
 
 async def test_unhandled_errors_are_json_with_request_id(client, owner, seeded, fake_agent, monkeypatch):

@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { useNavigate, Link } from 'react-router-dom';
+import { useNavigate, useLocation, Link } from 'react-router-dom';
 import { useAuthStore } from '../store';
 import api, { getErrorMessage } from '../api';
 import Banner from '../components/Banner';
@@ -7,6 +7,8 @@ import Spinner from '../components/Spinner';
 
 export default function LoginPage() {
   const navigate = useNavigate();
+  const location = useLocation();
+  const notice = location.state?.notice;
   const setAccessToken = useAuthStore((state) => state.setAccessToken);
   const setUser = useAuthStore((state) => state.setUser);
 
@@ -51,6 +53,7 @@ export default function LoginPage() {
 
         <div className="bg-white rounded-2xl shadow-soft border border-gray-100 p-8">
           <form onSubmit={handleSubmit} className="space-y-4">
+            {notice && !error && <Banner type="success">{notice}</Banner>}
             {error && (
               <Banner type="error" onDismiss={() => setError('')}>
                 {error}
@@ -69,7 +72,12 @@ export default function LoginPage() {
             </div>
 
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Password</label>
+              <div className="flex items-center justify-between mb-1">
+                <label className="block text-sm font-medium text-gray-700">Password</label>
+                <Link to="/forgot-password" className="text-xs text-brand-700 hover:underline">
+                  Forgot password?
+                </Link>
+              </div>
               <input
                 type="password"
                 value={password}

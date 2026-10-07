@@ -26,6 +26,7 @@ def test_ask_response_accepts_tool_call_entries():
         answer="a",
         tool_calls=[entry],
         result=QueryResult(columns=[], rows=[]),
+        conversation_id="c1",
         total_execution_time_ms=1,
     )
     assert response.tool_calls[0].tool_name == "run_sql"
